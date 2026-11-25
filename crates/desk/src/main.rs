@@ -33,6 +33,7 @@ mod tray;
 mod render;
 mod server;
 mod settings;
+mod screencopy;
 mod shell;
 mod shm;
 mod slab;
@@ -230,6 +231,7 @@ fn main() {
         tray: Default::default(),
         apps: vec![],
         pending_screenshot: None,
+        screencopy: Vec::new(),
         display_cfg: layout::load_config(),
         mm_k: 1.0,
         mm_origin: (0.0, 0.0),
@@ -311,6 +313,8 @@ fn main() {
             d.spawn(&format!("'{}' files --desktop", exe.to_string_lossy().replace('\'', r"'\''")));
         }
     }
+    // Screen sharing: the portal (started by D-Bus) must find this desktop.
+    screencopy::setup_portal(&mut d);
     for c in spawn {
         d.spawn(&c);
     }
@@ -373,6 +377,7 @@ fn main() {
                 }
             }
         }
+        screencopy::process(&mut d, be.as_mut());
         if let Some(path) = d.pending_screenshot.take() {
             if let Ok(png) = ipc::screenshot(&mut d, be.as_mut(), "all", 1) {
                 let _ = std::fs::write(&path, png);

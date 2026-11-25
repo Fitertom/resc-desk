@@ -42,6 +42,7 @@ pub enum Data {
     FracScale(SKey),
     LayerSurface(SKey),
     Params(Box<crate::dmabuf::Params>),
+    ScreencopyFrame(Box<crate::screencopy::FrameInfo>),
 }
 
 pub struct Client {

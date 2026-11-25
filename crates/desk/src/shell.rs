@@ -579,9 +579,10 @@ pub fn start_button(d: &Desk, oi: usize) -> Option<Rect> {
     taskbar_layout(d, oi).into_iter().find(|(i, _)| *i == TbItem::Start).map(|(_, r)| r)
 }
 
-/// Window `wk`'s taskbar button (logical): on the window's own output, else the first.
+/// Window `wk`'s taskbar button (logical): on the output the window stands on now, else the first.
 pub fn button_rect(d: &Desk, wk: WKey) -> Option<Rect> {
-    let own = d.windows.get(wk)?.output.min(d.outputs.len().saturating_sub(1));
+    d.windows.get(wk)?;
+    let own = wm::window_output(d, wk).min(d.outputs.len().saturating_sub(1));
     std::iter::once(own).chain(0..d.outputs.len()).filter(|oi| *oi < d.outputs.len() && !fullscreen_on(d, *oi)).find_map(|oi| {
         taskbar_layout(d, oi).into_iter().find(|(i, _)| *i == TbItem::Win(wk)).map(|(_, r)| r)
     })

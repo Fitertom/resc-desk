@@ -274,6 +274,7 @@ fn pointer_by(d: &mut Desk, dx: f64, dy: f64, ms: u64) {
     // Device pixels are physical pixels of the monitor under the pointer.
     let scale = d.output_at(d.seat.x, d.seat.y).map_or(1.0, |oi| d.outputs[oi].scale);
     let (x, y) = (d.seat.x + dx / scale, d.seat.y + dy / scale);
+    let (x, y) = crate::layout::wall_motion(d, (d.seat.x, d.seat.y), (x, y));
     crate::input::pointer_motion(d, x, y, ms as u32);
 }
 

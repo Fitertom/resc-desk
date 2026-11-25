@@ -56,6 +56,26 @@ impl Buffer {
         let need = self.offset as u64 + self.stride as u64 * self.h as u64;
         self.w > 0 && self.h > 0 && self.stride >= self.w * 4 && need <= pool.size() as u64
     }
+    /// Lets `f(pixels_u32, stride_px)` write into the buffer (screencopy). The pool is mapped
+    /// writable just for this; false when that fails or the client's memory faults.
+    pub fn write_pixels(&self, f: impl FnOnce(&mut [u32], usize)) -> bool {
+        if self.broken.get() || self.stride % 4 != 0 || self.offset % 4 != 0 || !self.valid_for_pool() {
+            return false;
+        }
+        let Some(pool) = &self.pool else { return false };
+        let Ok(m) = sys::Mmap::map(pool.fd.as_fd(), pool.size(), true, true) else { return false };
+        let len = self.stride as usize * self.h as usize;
+        if self.offset + len > m.len {
+            return false;
+        }
+        let px = unsafe { std::slice::from_raw_parts_mut(m.ptr.add(self.offset) as *mut u32, len / 4) };
+        let ((), faulted) = sys::with_sigbus_guard(m.ptr, m.len, || f(px, self.stride as usize / 4));
+        if faulted {
+            self.broken.set(true);
+        }
+        !faulted
+    }
+
     /// Calls `f(pixels_u32, stride_px)` with the buffer content. Returns None if broken.
     pub fn with_pixels<R>(&self, f: impl FnOnce(&[u32], usize) -> R) -> Option<R> {
         if let Some(dm) = &self.dmabuf {

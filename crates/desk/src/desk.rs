@@ -108,6 +108,8 @@ pub struct Desk {
     pub tray: crate::tray::Tray,
     pub apps: Vec<crate::apps::App>,
     pub pending_screenshot: Option<String>,
+    /// Screen copies waiting for pixels (screencopy.rs).
+    pub screencopy: Vec<crate::screencopy::Pending>,
     pub display_cfg: crate::layout::DisplayConfig,
     /// Logical px per millimetre of the monitor plane, and the plane origin (mm).
     pub mm_k: f64,
@@ -505,6 +507,8 @@ impl Desk {
         let mut c = std::process::Command::new("/bin/sh");
         c.arg("-c").arg(cmd).env("WAYLAND_DISPLAY", &self.socket_name);
         c.env("XDG_SESSION_TYPE", "wayland");
+        // The portal picks its backends by this (screencopy.rs: resc-portals.conf).
+        c.env("XDG_CURRENT_DESKTOP", crate::screencopy::DESKTOP);
         c.env("GDK_BACKEND", "wayland");
         c.env("QT_QPA_PLATFORM", "wayland");
         c.env("MOZ_ENABLE_WAYLAND", "1");

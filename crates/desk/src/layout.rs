@@ -14,6 +14,7 @@
 //! mode, crates/resc_window/src/physical.rs), the monitor's reported size (EDID),
 //! or 96 dpi × the scale hint.
 use crate::desk::Desk;
+use crate::geom::Rect;
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -436,15 +437,72 @@ fn square_planes(pixels: &[[i64; 4]], planes: &mut [[f64; 4]]) {
 /// the direction of motion to the monitor on the other side, at the same physical
 /// height (LittleBigMouse-style). None when nothing is there (then it is clamped).
 pub fn cross_gap(d: &Desk, from: (f64, f64), to: (f64, f64)) -> Option<(f64, f64)> {
-    let cur = d.output_at(from.0, from.1)?;
-    let c = d.outputs[cur].rect();
+    let rects: Vec<Rect> = d.outputs.iter().map(|o| o.rect()).collect();
+    cross_gap_in(&rects, from, to)
+}
+
+fn output_in(rects: &[Rect], x: f64, y: f64) -> Option<usize> {
+    rects.iter().position(|r| r.contains(x, y))
+}
+
+/// Relative pointer motion with walls: the pointer passes from one monitor to the
+/// next only where they really touch (or face each other across a bezel gap). Where
+/// the edge has nothing beside it, it is a wall: the pointer stops there and slides
+/// along it instead of jumping to whichever monitor is nearest.
+pub fn wall_motion(d: &Desk, from: (f64, f64), to: (f64, f64)) -> (f64, f64) {
+    let rects: Vec<Rect> = d.outputs.iter().map(|o| o.rect()).collect();
+    wall_motion_in(&rects, from, to, 0)
+}
+
+fn wall_motion_in(rects: &[Rect], from: (f64, f64), to: (f64, f64), depth: u32) -> (f64, f64) {
+    let Some(cur) = output_in(rects, from.0, from.1) else { return to };
+    let c = rects[cur];
+    if c.contains(to.0, to.1) || depth > 2 {
+        return to;
+    }
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let (x0, x1, y0, y1) = (c.x as f64, c.x1() as f64, c.y as f64, c.y1() as f64);
+    // Fraction of the step at which the pointer leaves `c` through a vertical / horizontal edge.
+    let tx = if to.0 >= x1 { (x1 - from.0) / dx } else if to.0 < x0 { (x0 - from.0) / dx } else { f64::INFINITY };
+    let ty = if to.1 >= y1 { (y1 - from.1) / dy } else if to.1 < y0 { (y0 - from.1) / dy } else { f64::INFINITY };
+    const EPS: f64 = 1e-3;
+    let vertical_edge = tx <= ty;
+    let probe = if vertical_edge {
+        let ey = from.1 + dy * tx.clamp(0.0, 1.0);
+        (if dx > 0.0 { x1 } else { x0 - EPS }, ey.clamp(y0, y1 - EPS))
+    } else {
+        let ex = from.0 + dx * ty.clamp(0.0, 1.0);
+        (ex.clamp(x0, x1 - EPS), if dy > 0.0 { y1 } else { y0 - EPS })
+    };
+    if let Some(o) = output_in(rects, probe.0, probe.1) {
+        // A neighbour really touches this spot of the edge: go on into it.
+        if output_in(rects, to.0, to.1).is_some() {
+            return to;
+        }
+        let r = rects[o];
+        return (to.0.clamp(r.x as f64, r.x1() as f64 - EPS), to.1.clamp(r.y as f64, r.y1() as f64 - EPS));
+    }
+    // Nothing touches here; a monitor across a bezel gap still counts.
+    // Judged where the pointer meets the edge, not where the step would end.
+    let across = if vertical_edge { (to.0, probe.1) } else { (probe.0, to.1) };
+    if let Some(p) = cross_gap_in(rects, from, across) {
+        return p;
+    }
+    // A wall: stop at it and keep the motion along it.
+    let slid = if vertical_edge { (to.0.clamp(x0, x1 - EPS), to.1) } else { (to.0, to.1.clamp(y0, y1 - EPS)) };
+    let start = if vertical_edge { (slid.0, from.1) } else { (from.0, slid.1) };
+    wall_motion_in(rects, start, slid, depth + 1)
+}
+
+fn cross_gap_in(rects: &[Rect], from: (f64, f64), to: (f64, f64)) -> Option<(f64, f64)> {
+    let cur = output_in(rects, from.0, from.1)?;
+    let c = rects[cur];
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
     let mut best: Option<(f64, (f64, f64))> = None;
-    for (i, o) in d.outputs.iter().enumerate() {
+    for (i, &r) in rects.iter().enumerate() {
         if i == cur {
             continue;
         }
-        let r = o.rect();
         let cand = if dx > 0.0 && r.x >= c.x1() && to.1 >= r.y as f64 && to.1 < r.y1() as f64 {
             Some(((r.x - c.x1()) as f64, (r.x as f64 + (to.0 - c.x1() as f64).max(0.0), to.1)))
         } else if dx < 0.0 && r.x1() <= c.x && to.1 >= r.y as f64 && to.1 < r.y1() as f64 {
@@ -456,7 +514,20 @@ pub fn cross_gap(d: &Desk, from: (f64, f64), to: (f64, f64)) -> Option<(f64, f64
         } else {
             None
         };
-        if let Some((dist, p)) = cand {
+        // Only a real bezel gap counts: no other monitor may stand in the band between the
+        // two (at any height), else the pointer would fly under or over it to a far one.
+        let horizontal = dx != 0.0 && (r.x >= c.x1() || r.x1() <= c.x);
+        let (lo, hi) = if horizontal {
+            if r.x >= c.x1() { (c.x1(), r.x) } else { (r.x1(), c.x) }
+        } else if r.y >= c.y1() {
+            (c.y1(), r.y)
+        } else {
+            (r.y1(), c.y)
+        };
+        let blocked = rects.iter().enumerate().any(|(j, o)| {
+            j != cur && j != i && if horizontal { o.x < hi && o.x1() > lo } else { o.y < hi && o.y1() > lo }
+        });
+        if let Some((dist, p)) = cand.filter(|_| !blocked) {
             if best.map_or(true, |b| dist < b.0) {
                 best = Some((dist, p));
             }
@@ -464,8 +535,8 @@ pub fn cross_gap(d: &Desk, from: (f64, f64), to: (f64, f64)) -> Option<(f64, f64
     }
     let (_, (x, y)) = best?;
     // Land inside the target monitor.
-    let o = d.output_at(x, y).or_else(|| d.outputs.iter().position(|o| o.rect().inflate(1).contains(x, y)))?;
-    let r = d.outputs[o].rect();
+    let o = output_in(rects, x, y).or_else(|| rects.iter().position(|r| r.inflate(1).contains(x, y)))?;
+    let r = rects[o];
     Some((x.clamp(r.x as f64, r.x1() as f64 - 1.0), y.clamp(r.y as f64, r.y1() as f64 - 1.0)))
 }
 
@@ -480,6 +551,43 @@ mod tests {
         square_planes(&pixels, &mut planes);
         assert!((planes[1][2] - 241.4 * 2560.0 / 1080.0).abs() < 1e-9);
         assert!((planes[2][0] + planes[2][2] - -40.0).abs() < 1e-9);
+    }
+
+    // Primary 3440x1440 at 0,0; a lower monitor glued to its right edge from y = 600.
+    const WALLS: [Rect; 2] = [Rect::new(0, 0, 3440, 1440), Rect::new(3440, 600, 2560, 1080)];
+
+    #[test]
+    fn wall_stops_pointer_above_lower_neighbour() {
+        // Fast flick right at y = 550, just above the neighbour's top: no jump onto it.
+        let p = wall_motion_in(&WALLS, (3400.0, 550.0), (3500.0, 560.0), 0);
+        assert!(p.0 < 3440.0 && p.0 >= 3439.0, "{p:?}");
+        assert_eq!(p.1, 560.0); // slides along the wall
+    }
+
+    #[test]
+    fn pointer_crosses_where_monitors_touch() {
+        let p = wall_motion_in(&WALLS, (3400.0, 700.0), (3500.0, 710.0), 0);
+        assert_eq!(p, (3500.0, 710.0));
+    }
+
+    #[test]
+    fn diagonal_through_the_corner_is_blocked() {
+        // Starts above the neighbour, ends inside it, but leaves through the wall part.
+        let p = wall_motion_in(&WALLS, (3430.0, 585.0), (3460.0, 615.0), 0);
+        assert!(p.0 < 3440.0, "{p:?}");
+    }
+
+    #[test]
+    fn no_flight_under_a_monitor_to_a_far_one() {
+        // Your layout: portrait left (tall), primary, right one lower than the primary's bottom.
+        let r = [Rect::new(-983, -62, 983, 1747), Rect::new(0, 0, 3440, 1440), Rect::new(3440, 646, 1944, 820)];
+        // Along the right monitor's bottom (below the primary) to the left: a wall, not the portrait.
+        let p = wall_motion_in(&r, (3460.0, 1460.0), (3420.0, 1460.0), 0);
+        assert!(p.0 >= 3440.0, "{p:?}");
+        // A real bezel gap (nothing between) is still crossed.
+        let g = [Rect::new(0, 0, 1000, 1000), Rect::new(1100, 0, 1000, 1000)];
+        let q = wall_motion_in(&g, (990.0, 500.0), (1010.0, 500.0), 0);
+        assert!(q.0 >= 1100.0, "{q:?}");
     }
 
     #[test]

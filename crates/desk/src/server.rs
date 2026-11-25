@@ -688,6 +688,24 @@ fn dispatch(d: &mut Desk, ck: CKey, h: wl::wire::MsgHdr, iface: Iface, ver: u32)
                 new_obj(d, ck, bid, Iface::WlBuffer, 1, Data::Buffer(Rc::new(buf)));
             }
         },
+        // wlr-screencopy (screencopy.rs): screen sharing and screenshots.
+        Iface::ZwlrScreencopyManagerV1 => match parse!(d, ck, h, zwlr_screencopy_manager_v1) {
+            zwlr_screencopy_manager_v1::Request::Destroy => destroy_obj(d, ck, id),
+            zwlr_screencopy_manager_v1::Request::CaptureOutput { frame, overlay_cursor: _, output } => {
+                crate::screencopy::capture(d, ck, frame, ver, output, None);
+            }
+            zwlr_screencopy_manager_v1::Request::CaptureOutputRegion { frame, overlay_cursor: _, output, x, y, width, height } => {
+                crate::screencopy::capture(d, ck, frame, ver, output, Some((x, y, width, height)));
+            }
+        },
+        Iface::ZwlrScreencopyFrameV1 => match parse!(d, ck, h, zwlr_screencopy_frame_v1) {
+            zwlr_screencopy_frame_v1::Request::Destroy => {
+                crate::screencopy::forget(d, ck, id);
+                destroy_obj(d, ck, id);
+            }
+            zwlr_screencopy_frame_v1::Request::Copy { buffer } => crate::screencopy::copy(d, ck, id, buffer, false),
+            zwlr_screencopy_frame_v1::Request::CopyWithDamage { buffer } => crate::screencopy::copy(d, ck, id, buffer, true),
+        },
         // linux-dmabuf (dmabuf.rs): GPU buffers.
         Iface::ZwpLinuxDmabufV1 => match parse!(d, ck, h, zwp_linux_dmabuf_v1) {
             zwp_linux_dmabuf_v1::Request::Destroy => destroy_obj(d, ck, id),
@@ -822,6 +840,7 @@ pub fn advertised_globals(d: &mut Desk) {
         (ZxdgOutputManagerV1, 3),
         (WpCursorShapeManagerV1, 1),
         (WpSinglePixelBufferManagerV1, 1),
+        (ZwlrScreencopyManagerV1, 3),
     ] {
         d.add_global(i, v, None);
     }

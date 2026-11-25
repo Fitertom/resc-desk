@@ -553,7 +553,8 @@ fn save_restore(d: &mut Desk, wk: WKey) {
     }
 }
 
-fn window_output(d: &Desk, wk: WKey) -> usize {
+/// The output window `wk` stands on now (most of its frame), not where it was first placed.
+pub fn window_output(d: &Desk, wk: WKey) -> usize {
     if d.windows[wk].desktop() {
         return crate::monitors::primary_index(d);
     }

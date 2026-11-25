@@ -351,6 +351,10 @@ pub fn pointer_button(d: &mut Desk, button: u32, pressed: bool, time: u32) {
         }
         Grab::Move { wk, .. } if last => {
             d.seat.grab = Grab::None;
+            // Dropped on another monitor: that is its monitor now (minimize, maximize, monitor changes).
+            if d.windows.contains(wk) {
+                d.windows[wk].output = wm::window_output(d, wk);
+            }
             if let Some(r) = d.overlay.snap_preview.take() {
                 d.damage(r.inflate(4));
                 finish_snap(d, wk);
