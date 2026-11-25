@@ -57,6 +57,11 @@ pub struct Tray {
     pub cal: crate::cal::Cal,
     /// A volume slider held (input?), and its value while held.
     drag: Option<bool>,
+    /// While dragging: the value shown, the last one sent and when (sends are throttled).
+    drag_val: Option<u32>,
+    drag_sent: Option<(u32, u32)>,
+    /// Change events that came in during a drag: one re-read when it ends.
+    stale: bool,
     hot: Option<Hot>,
     conn: Option<Pulse>,
     pub audio: Audio,
@@ -116,6 +121,8 @@ fn drop_conn(d: &mut Desk) {
 pub fn readable(d: &mut Desk) {
     let Some(p) = d.tray.conn.as_mut() else { return };
     match p.drain() {
+        // Mid-drag every step comes back as an event: re-read once, at the end.
+        Ok(true) if d.tray.drag.is_some() => d.tray.stale = true,
         Ok(true) => refresh(d),
         Ok(false) => {}
         Err(_) => drop_conn(d),
@@ -699,7 +706,7 @@ pub fn click(d: &mut Desk, x: f64, y: f64, button: u32) -> bool {
         Hot::Slider(input) => {
             d.tray.drag = Some(input);
             if let Some(v) = slider_value(d, input, x) {
-                set_volume(d, input, v);
+                drag_volume(d, input, v, false);
             }
         }
         Hot::Device(input, idx) => set_default(d, input, idx),
@@ -755,12 +762,52 @@ pub fn click(d: &mut Desk, x: f64, y: f64, button: u32) -> bool {
 pub fn drag(d: &mut Desk, x: f64) {
     let Some(input) = d.tray.drag else { return };
     if let Some(v) = slider_value(d, input, x) {
-        set_volume(d, input, v);
+        drag_volume(d, input, v, false);
     }
 }
 
 pub fn release(d: &mut Desk) {
+    if let (Some(input), Some(v)) = (d.tray.drag, d.tray.drag_val) {
+        drag_volume(d, input, v, true);
+    }
     d.tray.drag = None;
+    d.tray.drag_val = None;
+    d.tray.drag_sent = None;
+    if std::mem::take(&mut d.tray.stale) {
+        refresh(d);
+    }
+}
+
+/// A slider being dragged: the picture follows at once, PulseAudio gets the value without
+/// the main loop waiting for it, at most every 20 ms (`last`: the final value, always).
+/// Waiting for the answer and re-reading every device on each pointer event (a 1000 Hz mouse)
+/// froze the screen and hammered the device.
+fn drag_volume(d: &mut Desk, input: bool, percent: u32, last: bool) {
+    d.tray.drag_val = Some(percent);
+    let now = d.now_ms();
+    let Some(dev) = dev(&d.tray.audio, input) else { return };
+    if let Some((v, t)) = d.tray.drag_sent {
+        if v == percent || (!last && now.wrapping_sub(t) < 20) {
+            return;
+        }
+    } else if dev.percent() == percent {
+        return;
+    }
+    let Some(p) = d.tray.conn.as_mut() else { return };
+    if p.set_volume_nowait(&dev, input, percent).is_err() {
+        drop_conn(d);
+        return;
+    }
+    d.tray.drag_sent = Some((percent, now));
+    // Show it now; the server's own state comes with the next read.
+    let n = crate::pulse::NORM;
+    let list = if input { &mut d.tray.audio.sources } else { &mut d.tray.audio.sinks };
+    if let Some(x) = list.iter_mut().find(|x| x.index == dev.index) {
+        let v = (percent as u64 * n as u64 / 100) as u32;
+        x.volume.iter_mut().for_each(|c| *c = v);
+    }
+    damage_fly(d);
+    shell::damage_taskbars(d);
 }
 
 pub fn hover(d: &mut Desk, x: f64, y: f64) {

@@ -512,6 +512,15 @@ impl Pulse {
         self.request(if source { CMD_SET_SOURCE_VOLUME } else { CMD_SET_SINK_VOLUME }, a).map(|_| ())
     }
 
+    /// `set_volume` without waiting for the answer (a slider being dragged): the reply and
+    /// the change event come in later through `drain`.
+    pub fn set_volume_nowait(&mut self, dev: &Device, source: bool, percent: u32) -> std::io::Result<()> {
+        let v = (percent.min(150) as u64 * NORM as u64 / 100) as u32;
+        let mut a = Out::default();
+        a.u32(dev.index).str(None).cvolume(&vec![v; dev.volume.len().max(1)]);
+        self.send(if source { CMD_SET_SOURCE_VOLUME } else { CMD_SET_SINK_VOLUME }, a).map(|_| ())
+    }
+
     pub fn set_mute(&mut self, dev: &Device, source: bool, mute: bool) -> std::io::Result<()> {
         let mut a = Out::default();
         a.u32(dev.index).str(None).bool(mute);
