@@ -334,8 +334,14 @@ pub struct Mount {
     pub free: u64,
 }
 
+/// Tests: the only "disks" there are (a sandbox).
+pub static MOUNTS_OVERRIDE: std::sync::Mutex<Option<Vec<Mount>>> = std::sync::Mutex::new(None);
+
 /// `/` plus disks under /mnt, /media and /run/media (from /proc/self/mountinfo).
 pub fn mounts() -> Vec<Mount> {
+    if let Some(v) = MOUNTS_OVERRIDE.lock().unwrap().clone() {
+        return v;
+    }
     let text = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
     let mut v: Vec<Mount> = Vec::new();
     for line in text.lines() {

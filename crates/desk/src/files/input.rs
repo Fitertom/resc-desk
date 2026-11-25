@@ -517,7 +517,14 @@ impl App {
             self.release(b, x, y);
             return;
         }
-        // Menus: a click inside picks, outside closes.
+        // Menus: a click inside picks, outside closes; other buttons (back / forward)
+        // only close it.
+        if self.menu.is_some() && b != BTN_LEFT && b != BTN_RIGHT {
+            self.menu = None;
+            self.drag_to = None;
+            self.dirty = true;
+            return;
+        }
         if let Some(m) = self.menu.as_ref() {
             let in_sub = m.sub.as_ref().map(|(_, s)| (s.rect().contains(x, y), s.at(x, y))).unwrap_or((false, None));
             if in_sub.0 {
@@ -548,7 +555,10 @@ impl App {
             }
         }
         if self.dialog.is_some() {
-            self.dialog_click(x, y);
+            // A dialog takes only the left button (back/forward must not press its buttons).
+            if b == BTN_LEFT {
+                self.dialog_click(x, y);
+            }
             return;
         }
         if b == BTN_SIDE {
@@ -1060,7 +1070,15 @@ impl App {
             return;
         }
         if self.menu.is_some() {
-            self.menu_key(code);
+            // Keys a menu doesn't use close it and do nothing else (Alt+Left must not go back
+            // from under an open menu).
+            let m = self.mods;
+            if m.alt || m.ctrl || !matches!(code, k::UP | k::DOWN | k::LEFT | k::RIGHT | k::ENTER | k::SPACE | k::ESC) {
+                self.menu = None;
+                self.drag_to = None;
+            } else {
+                self.menu_key(code);
+            }
             return;
         }
         let m = self.mods;
@@ -1321,11 +1339,18 @@ impl App {
 
 /// The clipboard's text (wl-paste when installed).
 pub fn paste_text() -> Option<String> {
+    if open::dry() {
+        return open::DRY_LOG.lock().unwrap().iter().rev().find_map(|l| l.strip_prefix("clip ").map(str::to_string));
+    }
     let o = std::process::Command::new("wl-paste").arg("-n").arg("-t").arg("text/plain;charset=utf-8").stdin(std::process::Stdio::null()).output().ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).to_string())
 }
 
 pub fn copy_out(s: &str) {
+    if open::dry() {
+        open::DRY_LOG.lock().unwrap().push(format!("clip {s}"));
+        return;
+    }
     if let Ok(mut c) = std::process::Command::new("wl-copy").stdin(std::process::Stdio::piped()).spawn() {
         use std::io::Write;
         if let Some(mut i) = c.stdin.take() {

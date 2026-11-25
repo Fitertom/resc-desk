@@ -229,7 +229,19 @@ pub fn uri_of(p: &Path) -> String {
 
 /// Starts a command line the way «Пуск» does (through the compositor: launch animation,
 /// its environment); straight from here when there is no compositor to ask.
+/// Tests: nothing is started or put on the real clipboard; it is written down instead.
+pub static DRY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static DRY_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub fn dry() -> bool {
+    DRY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn spawn(cmd: &str, cwd: Option<&Path>) {
+    if dry() {
+        DRY_LOG.lock().unwrap().push(format!("spawn {cmd}"));
+        return;
+    }
     let cmd = match cwd {
         Some(d) => format!("cd {} && {cmd}", quote(&d.to_string_lossy())),
         None => cmd.to_string(),

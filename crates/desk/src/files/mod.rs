@@ -7,6 +7,8 @@
 //! Its own Wayland window (client.rs) like «Параметры».
 mod draw;
 mod input;
+#[cfg(test)]
+mod tests;
 pub mod model;
 pub mod open;
 pub mod ops;
@@ -896,21 +898,37 @@ impl App {
         self.enter(l, true);
     }
 
+    /// Back / forward skip places that are gone since (deleted folders, removed archives).
+    fn pop_live(stack: &mut Vec<Loc>, cur: &Loc) -> Option<Loc> {
+        while let Some(l) = stack.pop() {
+            if l != *cur && loc_exists(&l) {
+                return Some(l);
+            }
+        }
+        None
+    }
+
     pub fn go_back(&mut self) {
+        self.save_tab();
         let t = &mut self.tabs[self.cur];
-        if let Some(l) = t.back.pop() {
+        if let Some(l) = App::pop_live(&mut t.back, &t.loc) {
             let cur = std::mem::replace(&mut t.loc, l.clone());
-            t.fwd.push(cur.clone());
+            if t.fwd.last() != Some(&cur) {
+                t.fwd.push(cur.clone());
+            }
             self.enter(l, false);
             self.select_name_of(&cur);
         }
     }
 
     pub fn go_fwd(&mut self) {
+        self.save_tab();
         let t = &mut self.tabs[self.cur];
-        if let Some(l) = t.fwd.pop() {
+        if let Some(l) = App::pop_live(&mut t.fwd, &t.loc) {
             let cur = std::mem::replace(&mut t.loc, l.clone());
-            t.back.push(cur);
+            if t.back.last() != Some(&cur) {
+                t.back.push(cur);
+            }
             self.enter(l, false);
         }
     }
@@ -992,14 +1010,35 @@ impl App {
     /// Shows `l` (already the tab's location): its view, list, selection.
     fn enter(&mut self, l: Loc, fresh_nav: bool) {
         self.stop_search();
+        // The search box belongs to where it was typed.
+        if !matches!(l, Loc::Search(..)) {
+            self.search.clear();
+            self.search_on = false;
+            self.search_at = None;
+        }
         self.rename = None;
         self.addr = None;
         self.fresh.clear();
         self.view = self.view_for(&l);
+        if let Loc::Dir(p) = &l {
+            if !p.is_dir() {
+                // Gone since: the nearest folder above (reload does the walk).
+                self.tabs[self.cur].loc = l.clone();
+                self.items.clear();
+                self.sel.clear();
+                self.rects.clear();
+                self.focus = None;
+                self.reload(false);
+                return;
+            }
+        }
         self.watch.set(match &l {
             Loc::Dir(p) => Some(p.as_path()),
             _ => None,
         });
+        // What changed in the folder we left doesn't concern the new one.
+        self.watch.drain();
+        self.reload_at = None;
         self.load();
         // A folder full of pictures opens in icons the first time (like Windows' templates).
         if !self.views.contains_key(&l.key()) && matches!(l, Loc::Dir(_)) && self.view.mode == Mode::Details {
@@ -1029,6 +1068,27 @@ impl App {
 
     /// Lists the location again (keeping selection, focus and scroll by name).
     pub fn reload(&mut self, f5: bool) {
+        // The folder itself is gone (deleted, moved, unmounted): like Windows, show the
+        // nearest one above that still exists.
+        if let Loc::Dir(p) = self.loc().clone() {
+            if !p.is_dir() {
+                let mut up = p.parent();
+                while let Some(u) = up.filter(|u| !u.is_dir()) {
+                    up = u.parent();
+                }
+                let to = up.map(|u| Loc::Dir(u.to_path_buf())).unwrap_or(Loc::Pc);
+                let t = &mut self.tabs[self.cur];
+                t.loc = to.clone();
+                while t.back.last() == Some(&to) {
+                    t.back.pop();
+                }
+                while t.fwd.last() == Some(&to) {
+                    t.fwd.pop();
+                }
+                self.enter(to, true);
+                return;
+            }
+        }
         if f5 {
             self.fresh.clear();
             self.arcs.clear();
@@ -2157,9 +2217,15 @@ impl App {
         self.cur = i;
         let l = self.tabs[i].loc.clone();
         if let Loc::Search(b, _) = &l {
-            // Search results are not kept: back to the folder.
-            self.tabs[i].loc = Loc::Dir(b.clone());
-            self.enter(Loc::Dir(b.clone()), false);
+            // Search results are not kept: back to the folder, as «Назад» would.
+            let d = Loc::Dir(b.clone());
+            let t = &mut self.tabs[i];
+            if t.back.last() == Some(&d) {
+                t.back.pop();
+            }
+            t.fwd.clear();
+            t.loc = d.clone();
+            self.enter(d, false);
             return;
         }
         self.enter(l, false);
@@ -2280,6 +2346,11 @@ impl App {
             }
         }
         self.ops_tick();
+        // A dialog (a name clash, an error) closes any open menu, as a modal window does.
+        if self.dialog.is_some() && self.menu.is_some() {
+            self.menu = None;
+            self.drag_to = None;
+        }
         if let Some((_, t)) = &self.toast {
             if sys::now_ns() - t > 3_500_000_000 {
                 self.toast = None;
@@ -2354,6 +2425,12 @@ impl App {
                 }
             }
             self.undoing = None;
+            // A parent of where we are may have moved (no inotify event for that).
+            if !loc_exists(self.loc()) {
+                drop(p);
+                self.reload(false);
+                p = op.prog.lock().unwrap();
+            }
             let no_trash = std::mem::take(&mut p.no_trash);
             let errors = std::mem::take(&mut p.errors);
             let made = std::mem::take(&mut p.made);
@@ -2436,6 +2513,15 @@ impl App {
             m |= d.t.step(dt);
         }
         m
+    }
+}
+
+/// Whether a place can still be shown.
+fn loc_exists(l: &Loc) -> bool {
+    match l {
+        Loc::Dir(p) | Loc::Search(p, _) => p.is_dir(),
+        Loc::Arc(f, _) => f.is_file(),
+        Loc::Pc | Loc::Trash => true,
     }
 }
 
@@ -3065,6 +3151,11 @@ impl App {
     /// Text to the clipboard: through wl-copy when there is one (our client has no
     /// data device yet).
     pub fn copy_text(&mut self, s: &str) {
+        if open::dry() {
+            input::copy_out(s);
+            self.toast("Путь скопирован");
+            return;
+        }
         if open::have("wl-copy") {
             if let Ok(mut c) = std::process::Command::new("wl-copy").stdin(std::process::Stdio::piped()).spawn() {
                 use std::io::Write;

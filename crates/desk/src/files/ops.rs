@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
+/// Tests: the folder every operation must stay in.
+pub static SANDBOX: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 pub enum Job {
     Copy { items: Vec<PathBuf>, dest: PathBuf },
     Move { items: Vec<PathBuf>, dest: PathBuf },
@@ -96,6 +99,24 @@ struct Ctx {
 
 impl Op {
     pub fn start(id: u32, verb: &'static str, title: String, dest: Option<PathBuf>, job: Job) -> Op {
+        // Tests: never touch anything outside the sandbox.
+        let sandbox = SANDBOX.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(root) = sandbox {
+            let mut paths: Vec<&Path> = dest.iter().map(|d| d.as_path()).collect();
+            match &job {
+                Job::Copy { items, dest } | Job::Move { items, dest } => {
+                    paths.extend(items.iter().map(|p| p.as_path()));
+                    paths.push(dest);
+                }
+                Job::Trash(v) | Job::Delete(v) | Job::Restore(v) => paths.extend(v.iter().map(|p| p.as_path())),
+                Job::MoveBack(v) => paths.extend(v.iter().flat_map(|(a, b)| [a.as_path(), b.as_path()])),
+                Job::Zip { cwd, .. } => paths.push(cwd),
+            }
+            let tmp = std::env::temp_dir();
+            if let Some(bad) = paths.iter().find(|p| !p.starts_with(&root) && !p.starts_with(&tmp)) {
+                panic!("operation outside the sandbox: {verb} {}", bad.display());
+            }
+        }
         let prog = Arc::new(Mutex::new(Prog { scanning: true, ..Default::default() }));
         let cancel = Arc::new(AtomicBool::new(false));
         let pause = Arc::new(AtomicBool::new(false));
