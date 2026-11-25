@@ -98,6 +98,26 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
                 ));
             }
         }
+        // bench start SECONDS [move|idle|still]; bench: the result (bench.rs)
+        "bench" => match rest.first().copied() {
+            Some("start") => {
+                let secs: f64 = arg(1)?.parse().map_err(|_| "bad seconds")?;
+                let mode = match rest.get(2).copied().unwrap_or("move") {
+                    "move" => crate::bench::Mode::Move,
+                    "idle" => crate::bench::Mode::Idle,
+                    "still" => crate::bench::Mode::Still,
+                    _ => return Err("bench start SECONDS [move|idle|still]".into()),
+                };
+                crate::bench::start(d, secs.clamp(0.1, 600.0), mode);
+            }
+            _ => match (&d.bench.run, &d.bench.report) {
+                (Some(_), _) => out.push_str("running
+"),
+                (None, Some(r)) => out.push_str(r),
+                (None, None) => out.push_str("no bench yet
+"),
+            },
+        },
         "stats" => {
             out.push_str(&format!(
                 "clients {} surfaces {} windows {} workspace {}/{} pointer {:.0},{:.0}\n",

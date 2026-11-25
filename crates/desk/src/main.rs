@@ -23,6 +23,7 @@ mod layout;
 mod look;
 mod monitors;
 mod update;
+mod bench;
 mod net;
 mod png;
 mod pulse;
@@ -238,6 +239,7 @@ fn main() {
         clip: Default::default(),
         mons: Default::default(),
         gpu: None,
+        bench: Default::default(),
         xwm: None,
         x_receives: vec![],
         dmabuf: None,
@@ -359,11 +361,16 @@ fn main() {
         d.overlay.animating = shell::tick(&mut d);
         // X windows follow where they were moved, resized, focused (before drawing them).
         xwm::sync(&mut d);
+        bench::step(&mut d);
         // Repaint outputs that are ready and have something to show.
         for oi in 0..d.outputs.len() {
             let o = &d.outputs[oi];
             if !o.frame_pending && (!o.damage.is_empty() || o.wants_frame) {
+                let t0 = sys::now_ns();
                 be.present(&mut d, oi);
+                if d.bench.run.is_some() {
+                    bench::presented(&mut d, oi, t0);
+                }
             }
         }
         if let Some(path) = d.pending_screenshot.take() {

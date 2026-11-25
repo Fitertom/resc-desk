@@ -1230,7 +1230,7 @@ impl Drop for Drm {
 pub fn add_output(d: &mut Desk, m: &Monitor, card: &str) -> u32 {
     let (w, h) = m.dims();
     let mm = if m.rot % 180 == 90 { m.mm.map(|(a, b)| (b, a)) } else { m.mm };
-    let spec = super::OutSpec { w, h, scale: 1.0, mm, pos_mm: None };
+    let spec = super::OutSpec { w, h, scale: 1.0, mm, pos_mm: None, hz: None };
     let idx = d.add_output(m.name.clone(), w, h, &spec, m.refresh_mhz);
     let r = d.outputs[idx].rect();
     d.outputs[idx].damage.add(r);

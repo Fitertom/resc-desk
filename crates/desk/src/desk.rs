@@ -121,6 +121,8 @@ pub struct Desk {
     pub mons: crate::monitors::State,
     /// Vulkan renderer; None: the CPU draws everything (gpu.rs `init`).
     pub gpu: Option<Box<crate::gpu::Gpu>>,
+    /// `ctl bench` (bench.rs).
+    pub bench: crate::bench::State,
     /// X programs through Xwayland (xwm.rs); None when Xwayland is not installed or off.
     pub xwm: Option<Box<crate::xwm::Xwm>>,
     /// Wayland programs asking for what an X program copied: (source, type, where to write).

@@ -34,6 +34,8 @@ struct HBuf {
     _fd: OwnedFd,
     busy: bool,
     damage: Damage,
+    /// When it was last handed to the host (RESC_PROFILE: how long the host keeps it).
+    sent_ns: u64,
 }
 
 struct HostOut {
@@ -61,11 +63,15 @@ struct HostOut {
     pending_size: Option<(i32, i32)>,
     configured: bool,
     frame_cb: ObjId,
+    /// When the frame now shown was committed (RESC_PROFILE).
+    commit_ns: u64,
     last: usize,
 }
 
 pub struct Nested {
     conn: Conn,
+    /// RESC_PROFILE: log how long the host takes with each frame.
+    profile: bool,
     next_id: u32,
     objs: HashMap<ObjId, HObj>,
     globals: Vec<(u32, String, u32)>,
@@ -95,6 +101,7 @@ impl Nested {
         stream.set_nonblocking(true)?;
         let fd: OwnedFd = stream.into();
         let mut n = Nested {
+            profile: std::env::var_os("RESC_PROFILE").is_some(),
             conn: Conn::new(fd),
             next_id: 2,
             objs: HashMap::new(),
@@ -154,6 +161,7 @@ impl Nested {
                 pending_size: None,
                 configured: false,
                 frame_cb: 0,
+                commit_ns: 0,
                 last: 0,
             });
         }
@@ -322,7 +330,7 @@ impl Nested {
             wl_shm_pool::req::destroy(&mut self.conn, pool);
             let mut damage = Damage::default();
             damage.add(Rect::new(0, 0, w, h));
-            self.outs[oi].bufs.push(HBuf { buffer, map, _fd: fd, busy: false, damage });
+            self.outs[oi].bufs.push(HBuf { buffer, map, _fd: fd, busy: false, damage, sent_ns: 0 });
         }
     }
 
@@ -422,6 +430,9 @@ impl Nested {
             }
             HObj::Sync => self.synced = true,
             HObj::Frame(ho) => {
+                if self.profile && self.outs[ho].commit_ns != 0 {
+                    eprintln!("host out{ho}: frame done {:.2} ms after commit", (sys::now_ns() - self.outs[ho].commit_ns) as f64 / 1e6);
+                }
                 self.outs[ho].frame_cb = 0;
                 if let Some(oi) = self.out_by_id(d, ho) {
                     d.outputs[oi].frame_pending = false;
@@ -479,8 +490,12 @@ impl Nested {
                 _ => {}
             },
             HObj::Buffer(ho, bi) => {
+                let profile = self.profile;
                 if let Some(b) = self.outs.get_mut(ho).and_then(|o| o.bufs.get_mut(bi)) {
                     b.busy = false;
+                    if profile && b.sent_ns != 0 {
+                        eprintln!("host out{ho}: buffer {bi} released {:.2} ms after commit", (sys::now_ns() - b.sent_ns) as f64 / 1e6);
+                    }
                 }
                 if self.outs.get(ho).map_or(false, |o| o.frame_cb == 0) {
                     if let Some(oi) = self.out_by_id(d, ho) {
@@ -591,6 +606,9 @@ impl Backend for Nested {
         // (otherwise the main loop would spin on the pending damage).
         let free = (0..self.outs[ho].bufs.len()).find(|i| !self.outs[ho].bufs[*i].busy);
         if !self.outs[ho].configured || self.outs[ho].frame_cb != 0 || free.is_none() {
+            if self.profile && self.outs[ho].configured && self.outs[ho].frame_cb == 0 {
+                eprintln!("host out{ho}: no free buffer, waiting");
+            }
             d.outputs[oi].frame_pending = true;
             return;
         }
@@ -636,6 +654,9 @@ impl Backend for Nested {
         self.outs[ho].frame_cb = cb;
         self.outs[ho].bufs[bi].busy = true;
         self.outs[ho].last = bi;
+        let now = sys::now_ns();
+        self.outs[ho].commit_ns = now;
+        self.outs[ho].bufs[bi].sent_ns = now;
         let o = &mut d.outputs[oi];
         o.frame_pending = true;
         o.last_frame_ns = sys::now_ns();

@@ -41,6 +41,8 @@ pub struct OutSpec {
     pub scale: f64,
     pub mm: Option<(f64, f64)>,
     pub pos_mm: Option<(f64, f64)>,
+    /// `@<n>hz`: the refresh rate of a virtual (headless) monitor.
+    pub hz: Option<f64>,
 }
 
 fn pair<T: std::str::FromStr>(s: &str, sep: char) -> Option<(T, T)> {
@@ -58,20 +60,26 @@ pub fn parse_outputs(spec: &str) -> Vec<OutSpec> {
             Some(i) => (&part[..i], Some(&part[i + 1..])),
             None => (part, None),
         };
-        let (main, scale) = match main.split_once('@') {
-            Some((s, sc)) => (s, sc.parse::<f64>().unwrap_or(1.0)),
-            None => (main, 1.0),
-        };
+        // 1920x1080@1.25@1000hz: a scale and a refresh rate, either or both.
+        let mut at = main.split('@');
+        let main = at.next().unwrap_or("");
+        let (mut scale, mut hz) = (1.0, None);
+        for t in at {
+            match t.strip_suffix("hz").or_else(|| t.strip_suffix("Hz")) {
+                Some(n) => hz = n.parse::<f64>().ok().filter(|h| *h >= 1.0),
+                None => scale = t.parse::<f64>().unwrap_or(1.0),
+            }
+        }
         let (px, mm) = match main.split_once('/') {
             Some((p, m)) => (p, pair::<f64>(m, 'x')),
             None => (main, None),
         };
         let Some((w, h)) = pair::<i32>(px, 'x') else { continue };
         let pos_mm = pos.and_then(|p| pair::<f64>(p, '+'));
-        v.push(OutSpec { w: w.max(64), h: h.max(64), scale: scale.clamp(0.5, 4.0), mm, pos_mm });
+        v.push(OutSpec { w: w.max(64), h: h.max(64), scale: scale.clamp(0.5, 4.0), mm, pos_mm, hz });
     }
     if v.is_empty() {
-        v.push(OutSpec { w: 1920, h: 1080, scale: 1.0, mm: None, pos_mm: None });
+        v.push(OutSpec { w: 1920, h: 1080, scale: 1.0, mm: None, pos_mm: None, hz: None });
     }
     v
 }
@@ -90,4 +98,15 @@ pub fn take_damage(d: &mut Desk, oi: usize) -> Damage {
     }
     o.wants_frame = false;
     out
+}
+
+#[cfg(test)]
+mod spec_tests {
+    #[test]
+    fn outputs_with_refresh() {
+        let v = super::parse_outputs("1920x1080@1000hz,1280x720@1.5,800x600@2@144hz");
+        assert_eq!((v[0].w, v[0].scale, v[0].hz), (1920, 1.0, Some(1000.0)));
+        assert_eq!((v[1].scale, v[1].hz), (1.5, None));
+        assert_eq!((v[2].scale, v[2].hz), (2.0, Some(144.0)));
+    }
 }

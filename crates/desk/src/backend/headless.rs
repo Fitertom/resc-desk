@@ -15,7 +15,8 @@ impl Headless {
         let timer = sys::TimerFd::new()?;
         d.ep.add(timer.fd.as_raw_fd(), TOK_BACKEND, sys::EPOLLIN)?;
         for (i, s) in super::parse_outputs(spec).into_iter().enumerate() {
-            d.add_output(format!("HEADLESS-{}", i + 1), s.w, s.h, &s, 60000);
+            let mhz = (s.hz.unwrap_or(60.0) * 1000.0).round() as i32;
+            d.add_output(format!("HEADLESS-{}", i + 1), s.w, s.h, &s, mhz);
         }
         Ok(Self { fbs: HashMap::new(), timer })
     }
@@ -50,8 +51,9 @@ impl Backend for Headless {
         let o = &mut d.outputs[oi];
         o.frame_pending = true;
         o.frames += 1;
+        // Like a vblank: the next one a period after this frame began, not after it ended.
         let period = 1_000_000_000_000u64 / o.refresh_mhz.max(1000) as u64;
-        self.timer.arm(period, 0);
+        self.timer.arm(period.saturating_sub(sys::now_ns() - t0).max(1000), 0);
     }
 
     fn name(&self) -> &'static str {
