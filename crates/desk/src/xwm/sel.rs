@@ -344,7 +344,7 @@ fn targets_ready(x: &mut Xwm, d: &mut Desk, i: usize, gen: u32) {
         return;
     }
     let mimes = types.iter().map(|(m, _)| m.clone()).collect();
-    let dk = d.sources.insert(DataSource { client: x.client.unwrap_or_default(), obj: 0, mimes, primary: i == 1, own: None, x11: true });
+    let dk = d.sources.insert(DataSource { client: x.client.unwrap_or_default(), obj: 0, mimes, primary: i == 1, own: None, x11: true, actions: 0 });
     x.sel.one[i].src = Some(dk);
     x.sel.one[i].from_x = types;
     if i == 0 {

@@ -420,6 +420,10 @@ impl Item {
 }
 
 fn push_tree(d: &Desk, sk: SKey, out: &mut Vec<Item>, round: Option<(Rect, i32)>) {
+    push_tree_p(d, sk, out, round, true);
+}
+
+fn push_tree_p(d: &Desk, sk: SKey, out: &mut Vec<Item>, round: Option<(Rect, i32)>, popups: bool) {
     let Some(s) = d.surfaces.get(sk) else { return };
     for c in &s.subs {
         if *c == SKey::default() {
@@ -439,7 +443,7 @@ fn push_tree(d: &Desk, sk: SKey, out: &mut Vec<Item>, round: Option<(Rect, i32)>
         }
     }
     // Popups (menus) may stick out of the window: never clipped.
-    for p in &s.popups {
+    for p in s.popups.iter().filter(|_| popups) {
         if d.surfaces.get(*p).map_or(false, |p| p.mapped) {
             push_tree(d, *p, out, None);
         }
@@ -495,7 +499,19 @@ fn build_scene_m(d: &Desk, oi: usize, morphs: bool) -> Vec<Item> {
         }
         let r = shell::window_radius(d, wk);
         let round = (r > 0).then(|| (frame.inflate(-shell::BORDER), r - shell::BORDER));
-        push_tree(d, w.surf, &mut items, round);
+        // The desktop's menus show over every window (below).
+        push_tree_p(d, w.surf, &mut items, round, !w.desktop());
+        for it in &mut items[first..] {
+            it.win = Some(wk);
+        }
+    }
+    for wk in drawn_stack(d, morphs).into_iter().filter(|k| d.windows[*k].desktop()) {
+        let first = items.len();
+        for p in d.surfaces.get(d.windows[wk].surf).map(|s| s.popups.clone()).unwrap_or_default() {
+            if d.surfaces.get(p).map_or(false, |p| p.mapped) {
+                push_tree(d, p, &mut items, None);
+            }
+        }
         for it in &mut items[first..] {
             it.win = Some(wk);
         }
@@ -556,6 +572,9 @@ pub fn render_output(d: &mut Desk, oi: usize, cv: &mut Canvas, damage: &Damage) 
     }
     if let Some(sk) = d.seat.cursor_surface {
         send_frame_done(d, sk, now);
+    }
+    if let Some((ik, _)) = crate::dnd::icon_rect(d) {
+        send_frame_done(d, ik, now);
     }
     rects
 }
@@ -884,6 +903,15 @@ const ARROW: [&str; 21] = [
 ];
 
 pub fn cursor_rect(d: &Desk) -> Rect {
+    let r = pointer_rect(d);
+    match crate::dnd::icon_rect(d) {
+        Some((_, ir)) if !r.is_empty() => r.union(&ir),
+        Some((_, ir)) => ir,
+        None => r,
+    }
+}
+
+fn pointer_rect(d: &Desk) -> Rect {
     if d.seat.cursor_hidden || d.outputs.is_empty() {
         return Rect::default();
     }
@@ -901,8 +929,11 @@ pub fn cursor_rect(d: &Desk) -> Rect {
 }
 
 fn draw_cursor(d: &Desk, xf: Xf, cv: &mut Canvas, clip: Rect) {
+    if let Some((ik, ir)) = crate::dnd::icon_rect(d) {
+        draw_surface(d, ik, cv, clip, xf.r(ir));
+    }
     if let Some(sk) = d.seat.cursor_surface {
-        let r = xf.r(cursor_rect(d));
+        let r = xf.r(pointer_rect(d));
         draw_surface(d, sk, cv, clip, r);
         return;
     }

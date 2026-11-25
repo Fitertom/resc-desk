@@ -1026,6 +1026,7 @@ pub fn run(args: &[String]) -> i32 {
                     }
                 }
                 Ev::Key(..) | Ev::Mods(_) => {}
+                _ => {}
             }
         }
         if app.walls_poll() && app.page == Page::Wallpaper {

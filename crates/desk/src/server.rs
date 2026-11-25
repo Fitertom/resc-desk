@@ -327,7 +327,7 @@ fn dispatch(d: &mut Desk, ck: CKey, h: wl::wire::MsgHdr, iface: Iface, ver: u32)
         }
         Iface::WlDataDeviceManager => match parse!(d, ck, h, wl_data_device_manager) {
             wl_data_device_manager::Request::CreateDataSource { id: sid } => {
-                let dk = d.sources.insert(DataSource { client: ck, obj: sid, mimes: vec![], primary: false, own: None, x11: false });
+                let dk = d.sources.insert(DataSource { client: ck, obj: sid, mimes: vec![], primary: false, own: None, x11: false, actions: 0 });
                 if !new_obj(d, ck, sid, Iface::WlDataSource, ver, Data::DataSource(dk)) {
                     d.sources.remove(dk);
                 }
@@ -356,15 +356,23 @@ fn dispatch(d: &mut Desk, ck: CKey, h: wl::wire::MsgHdr, iface: Iface, ver: u32)
                     destroy_source(d, dk);
                     destroy_obj(d, ck, id);
                 }
-                wl_data_source::Request::SetActions { .. } => {}
+                wl_data_source::Request::SetActions { dnd_actions } => {
+                    if let Some(s) = d.sources.get_mut(dk) {
+                        s.actions = dnd_actions & 7;
+                    }
+                    crate::dnd::choose(d);
+                }
             }
         }
         Iface::WlDataDevice => match parse!(d, ck, h, wl_data_device) {
-            wl_data_device::Request::StartDrag { source, .. } => {
-                // DnD is not implemented yet: cancel so the client does not hang.
-                if source != 0 {
-                    wl_data_source::evt::cancelled(&mut d.clients[ck].conn, source);
-                }
+            wl_data_device::Request::StartDrag { source, origin, icon, serial: _ } => {
+                let src = match data_of(d, ck, source) {
+                    Some(Data::DataSource(k)) => Some(*k),
+                    _ => None,
+                };
+                let origin = surface_of(d, ck, origin);
+                let icon = if icon == 0 { None } else { surface_of(d, ck, icon) };
+                crate::dnd::start(d, ck, src, origin, icon);
             }
             wl_data_device::Request::SetSelection { source, serial: _ } => {
                 let new = match data_of(d, ck, source) {
@@ -386,15 +394,20 @@ fn dispatch(d: &mut Desk, ck: CKey, h: wl::wire::MsgHdr, iface: Iface, ver: u32)
                     let dk = *dk;
                     source_send(d, dk, &mime_type, fd);
                 }
-                wl_data_offer::Request::Destroy => destroy_obj(d, ck, id),
-                _ => {}
+                wl_data_offer::Request::Destroy => {
+                    crate::dnd::offer_gone(d, ck, id);
+                    destroy_obj(d, ck, id);
+                }
+                wl_data_offer::Request::Accept { serial: _, mime_type } => crate::dnd::accept(d, ck, id, mime_type),
+                wl_data_offer::Request::SetActions { dnd_actions, preferred_action } => crate::dnd::set_actions(d, ck, id, dnd_actions & 7, preferred_action & 7),
+                wl_data_offer::Request::Finish => crate::dnd::finish(d, ck, id),
             }
         }
         // Primary selection: what is selected now, pasted with the middle button (separate from
         // the clipboard, not kept in its history).
         Iface::ZwpPrimarySelectionDeviceManagerV1 => match parse!(d, ck, h, zwp_primary_selection_device_manager_v1) {
             zwp_primary_selection_device_manager_v1::Request::CreateSource { id: sid } => {
-                let dk = d.sources.insert(DataSource { client: ck, obj: sid, mimes: vec![], primary: true, own: None, x11: false });
+                let dk = d.sources.insert(DataSource { client: ck, obj: sid, mimes: vec![], primary: true, own: None, x11: false, actions: 0 });
                 if !new_obj(d, ck, sid, Iface::ZwpPrimarySelectionSourceV1, ver, Data::DataSource(dk)) {
                     d.sources.remove(dk);
                 }
@@ -1055,7 +1068,7 @@ pub fn commit(d: &mut Desk, sk: SKey) {
     match role {
         Role::Toplevel(wk) => crate::wm::toplevel_commit(d, wk, old_frame),
         Role::Popup => popup_commit(d, sk),
-        Role::Cursor => {
+        Role::Cursor | Role::DndIcon => {
             let r = d.cursor_drawn;
             d.damage(r);
             crate::input::damage_cursor(d);
@@ -1107,6 +1120,12 @@ fn apply_state(d: &mut Desk, sk: SKey, p: Pending) {
     if s.role == Role::Cursor && (p.dx != 0 || p.dy != 0) {
         d.seat.cursor_hotspot.0 -= p.dx;
         d.seat.cursor_hotspot.1 -= p.dy;
+    }
+    if s.role == Role::DndIcon && (p.dx != 0 || p.dy != 0) {
+        if let Some(n) = d.dnd.as_mut() {
+            n.icon_off.0 += p.dx;
+            n.icon_off.1 += p.dy;
+        }
     }
     let s = &mut d.surfaces[sk];
     if let Some(sc) = p.scale {
@@ -1507,6 +1526,7 @@ pub fn dismiss_popups(d: &mut Desk) {
 // ------------------------------------------------------------------ data device
 
 pub fn destroy_source(d: &mut Desk, dk: DKey) {
+    crate::dnd::source_gone(d, dk);
     let focused = d.seat.kb_focus.and_then(|sk| d.surfaces.get(sk)).map(|s| s.client);
     if d.selection == Some(dk) {
         d.selection = None;

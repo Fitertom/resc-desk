@@ -1406,7 +1406,7 @@ pub fn switcher_step(d: &mut Desk, dir: i32) {
                 .mru
                 .iter()
                 .copied()
-                .filter(|k| d.windows[*k].workspace == d.workspace && d.surfaces.get(d.windows[*k].surf).map_or(false, |s| s.mapped))
+                .filter(|k| d.windows[*k].workspace == d.workspace && !d.windows[*k].desktop() && d.surfaces.get(d.windows[*k].surf).map_or(false, |s| s.mapped))
                 .collect();
             (l, dir)
         }

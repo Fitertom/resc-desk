@@ -179,6 +179,8 @@ pub enum Role {
     Subsurface,
     Cursor,
     Layer,
+    /// The picture that follows the pointer during a drag.
+    DndIcon,
 }
 
 pub struct PopupInfo {
@@ -372,6 +374,9 @@ pub struct Window {
 
 impl Window {
     pub fn frame_insets(&self) -> (i32, i32) {
+        if self.desktop() {
+            return (0, 0);
+        }
         if self.ssd && self.tile != Tile::Fullscreen { (crate::shell::BORDER, if self.merged() { 0 } else { crate::shell::TITLE_H }) } else { (0, 0) }
     }
 
@@ -380,6 +385,12 @@ impl Window {
     /// and asks us to move / maximize / minimize the window.
     pub fn merged(&self) -> bool {
         self.app_id == "resc.files"
+    }
+
+    /// The desktop's icons («Проводник» in desktop mode): under every window, the whole
+    /// work area, on every virtual desktop, never in the taskbar or Alt+Tab.
+    pub fn desktop(&self) -> bool {
+        self.app_id == "resc.desktop"
     }
 }
 
@@ -433,6 +444,8 @@ pub struct DataSource {
     pub own: Option<std::sync::Arc<Vec<u8>>>,
     /// What an X program copied: read through the X window manager (xwm/sel.rs).
     pub x11: bool,
+    /// What a drag allows (dnd::COPY | MOVE | ASK).
+    pub actions: u32,
 }
 
 // ------------------------------------------------------------------ globals

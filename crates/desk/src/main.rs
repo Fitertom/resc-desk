@@ -8,6 +8,7 @@ mod clock;
 mod dbus;
 mod desk;
 mod dmabuf;
+mod dnd;
 mod files;
 mod font;
 mod geom;
@@ -189,6 +190,8 @@ fn main() {
         keymap: None,
         repeat: (30, 400),
         selection: None,
+        dnd: None,
+        place_next: None,
         primary: None,
         children: vec![],
         running: true,
@@ -286,6 +289,12 @@ fn main() {
     }
     let x = d.xwm.as_ref().map(|x| format!(", X programs on DISPLAY=:{}", x.display)).unwrap_or_default();
     println!("resc-desk running on WAYLAND_DISPLAY={socket_name} ({} backend){x}, control: {ctl_path}", be.name());
+    // The desktop's icons («Проводник» in desktop mode); RESC_DESKTOP=0 for none.
+    if std::env::var("RESC_DESKTOP").map_or(true, |v| v != "0") {
+        if let Ok(exe) = std::env::current_exe() {
+            d.spawn(&format!("'{}' files --desktop", exe.to_string_lossy().replace('\'', r"'\''")));
+        }
+    }
     for c in spawn {
         d.spawn(&c);
     }

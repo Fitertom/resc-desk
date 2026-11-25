@@ -104,6 +104,19 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
                 d.seat.y
             ));
         }
+        // place-next APP X Y: the next window of APP opens with its point (X, Y) under the pointer.
+        "place-next" => {
+            let app = arg(0)?.to_string();
+            let x: i32 = arg(1)?.parse().map_err(|_| "bad x")?;
+            let y: i32 = arg(2)?.parse().map_err(|_| "bad y")?;
+            d.place_next = Some((app, x, y, d.now_ms() + 5000));
+        }
+        // move-active X Y: the active window moves so its point (X, Y) is under the pointer.
+        "move-active" => {
+            let x: i32 = arg(0)?.parse().map_err(|_| "bad x")?;
+            let y: i32 = arg(1)?.parse().map_err(|_| "bad y")?;
+            crate::wm::move_active_to_pointer(d, x, y);
+        }
         "move" => {
             let x: f64 = arg(0)?.parse().map_err(|_| "bad x")?;
             let y: f64 = arg(1)?.parse().map_err(|_| "bad y")?;

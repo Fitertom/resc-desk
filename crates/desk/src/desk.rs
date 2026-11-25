@@ -81,6 +81,11 @@ pub struct Desk {
     pub keymap: Option<Keymap>,
     pub repeat: (i32, i32),
     pub selection: Option<DKey>,
+    /// A drag and drop in progress (dnd.rs).
+    pub dnd: Option<crate::dnd::Dnd>,
+    /// The next window of this app id opens with point (x, y) of it under the pointer
+    /// (a tab torn off «Проводник»); until the deadline (ms).
+    pub place_next: Option<(String, i32, i32, u32)>,
     /// Primary selection: the last text selected, pasted with the middle button.
     pub primary: Option<DKey>,
     pub children: Vec<std::process::Child>,
@@ -426,6 +431,10 @@ impl Desk {
                 let (hx, hy) = self.seat.cursor_hotspot;
                 Some((self.seat.x as i32 - hx, self.seat.y as i32 - hy))
             }
+            Role::DndIcon => {
+                let o = self.dnd.as_ref()?.icon_off;
+                Some((self.seat.x as i32 + o.0, self.seat.y as i32 + o.1))
+            }
             _ => None,
         }
     }
@@ -436,7 +445,7 @@ impl Desk {
         if s.buffer.is_none() {
             return false;
         }
-        if s.role == Role::Cursor {
+        if s.role == Role::Cursor || s.role == Role::DndIcon {
             return true;
         }
         match self.window_of(sk) {

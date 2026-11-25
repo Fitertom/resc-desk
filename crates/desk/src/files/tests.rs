@@ -82,9 +82,26 @@ impl Sim {
     fn new() -> Sim {
         let g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let root = sandbox();
+        open::DRY_LOG.lock().unwrap_or_else(|e| e.into_inner()).clear();
         crate::font::init();
         let app = App::new(Loc::Dir(model::home()), 1180, 720);
         let mut s = Sim { app, root, log: vec![], _g: g };
+        s.settle();
+        s
+    }
+
+    /// The desktop's icons instead of a window.
+    fn desk() -> Sim {
+        let mut s = Sim::new();
+        let d = s.home().join("Desktop");
+        for n in ["Список дел.txt", "Отчёт.pdf", "фото.png"] {
+            write(&d.join(n), "x");
+        }
+        std::fs::create_dir_all(d.join("Проекты 2026")).unwrap();
+        s.app = App::new(Loc::Dir(desktop::desktop_dir()), 1600, 836);
+        s.app.desk = true;
+        s.app.view = s.app.view_for(&s.app.loc().clone());
+        s.app.lay();
         s.settle();
         s
     }
@@ -153,6 +170,9 @@ impl Sim {
         }
         if a.cur >= a.tabs.len() {
             self.fail("current tab past the end");
+        }
+        if a.tab_drop_at.is_some() && a.incoming.as_ref().map_or(true, |i| i.tab.is_none()) {
+            self.fail("a tab drop mark with no tab coming");
         }
         if a.col_drag.is_some() && a.press.is_none() {
             self.fail("a header drag with no button held");
@@ -467,7 +487,7 @@ fn nothing_outside_is_started() {
     s.open("Документы");
     s.open("notes.md");
     let log = open::DRY_LOG.lock().unwrap().clone();
-    assert!(log.iter().all(|l| l.starts_with("spawn") || l.starts_with("clip")), "{log:?}");
+    assert!(log.iter().all(|l| l.starts_with("spawn") || l.starts_with("clip") || l.starts_with("ctl ")), "{log:?}");
 }
 
 #[test]
@@ -757,6 +777,280 @@ fn history_model() {
     }
 }
 
+// ------------------------------------------------------------------ drag and drop between windows
+
+fn starts(s: &Sim) -> Vec<WinReq> {
+    s.app.winreq.iter().filter(|r| matches!(r, WinReq::StartDrag { .. })).cloned().collect()
+}
+
+fn told(s: &Sim) -> Option<WinReq> {
+    s.app.winreq.iter().rev().find(|r| matches!(r, WinReq::DndAccept { .. })).cloned()
+}
+
+/// A system drag from another program: enter at (x, y) offering `mime` with `data`.
+fn enter(s: &mut Sim, x: f64, y: f64, mime: &str, data: String) {
+    s.log.push(format!("dnd enter {x:.0},{y:.0} {mime}"));
+    s.app.winreq.clear();
+    let mut read = |m: &str| (m == mime).then(|| data.clone().into_bytes());
+    s.app.dnd_enter(x, y, &[mime.to_string()], &mut read);
+}
+
+#[test]
+fn uris_and_tabs_as_text() {
+    let p = PathBuf::from("/tmp/a b/Отчёт #1.txt");
+    let u = open::uri_of(&p);
+    assert!(u.starts_with("file:///tmp/a%20b/"));
+    std::fs::create_dir_all("/tmp/a b").unwrap();
+    std::fs::write(&p, "x").unwrap();
+    assert_eq!(dnd::parse_uris(format!("# comment\r\n{u}\r\nfile:///nope/gone\r\n").as_bytes()), vec![p.clone()]);
+    let _ = std::fs::remove_dir_all("/tmp/a b");
+    let t = Tab {
+        loc: Loc::Search("/x".into(), "q w".into()),
+        back: vec![Loc::Dir("/a".into()), Loc::Pc, Loc::Trash, Loc::Arc("/f.7z".into(), "in/side".into())],
+        fwd: vec![Loc::Dir("/b".into())],
+        sel: vec![],
+        scroll: 0.0,
+    };
+    let back = dnd::tab_parse(&dnd::tab_str(&t)).unwrap();
+    assert_eq!((back.loc, back.back, back.fwd), (t.loc, t.back, t.fwd));
+}
+
+#[test]
+fn files_dropped_from_elsewhere() {
+    let mut s = Sim::new();
+    let home = s.home();
+    write(&home.join("Downloads/a.txt"), "a");
+    write(&home.join("Downloads/b.txt"), "b");
+    s.open("Документы");
+    let vr = s.app.view_rect();
+    let (ex, ey) = ((vr.x + vr.w - 40) as f64, (vr.y1() - 20) as f64);
+    // Onto empty space: into this folder; the window says it takes text/uri-list.
+    enter(&mut s, ex, ey, dnd::URI_MIME, open::uri_of(&home.join("Downloads/a.txt")) + "\r\n");
+    match told(&s) {
+        Some(WinReq::DndAccept { mime: Some(m), actions, .. }) => assert!(m == dnd::URI_MIME && actions & dnd::COPY != 0),
+        r => s.fail(&format!("no accept: {r:?}")),
+    }
+    s.app.dnd_drop(dnd::COPY);
+    s.settle();
+    assert!(home.join("Documents/a.txt").exists() && home.join("Downloads/a.txt").exists(), "copied");
+    // Onto a folder, moving.
+    let i = s.item("Счета");
+    let r = s.item_rect(i);
+    enter(&mut s, r.x as f64 + 30.0, r.y as f64 + 10.0, dnd::URI_MIME, open::uri_of(&home.join("Downloads/b.txt")));
+    s.app.dnd_drop(dnd::MOVE);
+    s.settle();
+    assert!(home.join("Documents/Счета/b.txt").exists() && !home.join("Downloads/b.txt").exists(), "moved into the folder");
+    // Things already here, onto empty space: nothing to do.
+    enter(&mut s, ex, ey, dnd::URI_MIME, open::uri_of(&home.join("Documents/notes.md")));
+    assert!(matches!(told(&s), Some(WinReq::DndAccept { mime: None, .. })), "not into its own folder");
+    s.app.dnd_leave();
+    s.settle();
+    // A right drag asks.
+    write(&home.join("Downloads/c.txt"), "c");
+    enter(&mut s, ex, ey, dnd::URI_MIME, open::uri_of(&home.join("Downloads/c.txt")));
+    s.app.dnd_drop(dnd::ASK);
+    s.settle();
+    let m = s.app.menu.as_ref().unwrap_or_else(|| s.fail("no drop menu"));
+    let i = m.items.iter().position(|it| it.label == "Отмена").unwrap();
+    let r = m.item_rect(i);
+    s.click(r, "Отмена");
+    assert!(!home.join("Documents/c.txt").exists() && s.app.drop_paths.is_none());
+    // And the selection is not what a later drop moves.
+    let i = s.item("notes.md");
+    s.click(s.item_rect(i), "notes.md");
+    assert!(home.join("Downloads/c.txt").exists());
+}
+
+#[test]
+fn items_dragged_out_and_back() {
+    let mut s = Sim::new();
+    let home = s.home();
+    s.open("Документы");
+    let i = s.item("notes.md");
+    let r = s.item_rect(i);
+    let (x0, y0) = (r.x as f64 + 40.0, r.y as f64 + 10.0);
+    s.app.motion(x0, y0);
+    s.app.button(LEFT, true);
+    s.app.motion(x0 + 30.0, y0 + 5.0);
+    s.app.motion(-40.0, y0);
+    let st = starts(&s);
+    assert_eq!(st.len(), 1, "one system drag");
+    if let WinReq::StartDrag { mimes, actions, icon } = &st[0] {
+        assert!(mimes.contains(&dnd::URI_MIME) && *actions == dnd::COPY | dnd::MOVE && icon.is_some());
+    }
+    let data = String::from_utf8(s.app.drag_data(dnd::URI_MIME)).unwrap();
+    assert_eq!(data, open::uri_of(&home.join("Documents/notes.md")) + "\r\n");
+    s.app.motion(-60.0, y0);
+    assert_eq!(starts(&s).len(), 1, "started once");
+    // Back over our own window, onto «Счета», dropped (no button release comes: the
+    // compositor holds the pointer during a system drag).
+    let j = s.item("Счета");
+    let r = s.item_rect(j);
+    s.app.winreq.clear();
+    let mut read = |_: &str| -> Option<Vec<u8>> { panic!("reading our own drag would hang") };
+    s.app.dnd_enter(r.x as f64 + 30.0, r.y as f64 + 10.0, &[dnd::URI_MIME.to_string()], &mut read);
+    assert!(matches!(told(&s), Some(WinReq::DndAccept { mime: Some(_), .. })));
+    s.app.dnd_drop(dnd::MOVE);
+    s.app.drag_end(true);
+    s.settle();
+    assert!(home.join("Documents/Счета/notes.md").exists());
+    assert!(s.app.outgoing.is_none() && s.app.press.is_none() && s.app.incoming.is_none());
+    // Dragged out and let go nowhere: nothing happens.
+    let i = s.item("config.json");
+    let r = s.item_rect(i);
+    s.app.motion(r.x as f64 + 40.0, r.y as f64 + 10.0);
+    s.app.button(LEFT, true);
+    s.app.motion(r.x as f64 + 80.0, r.y as f64 + 30.0);
+    s.app.motion(s.app.w as f64 + 50.0, 300.0);
+    s.app.dnd_leave();
+    s.app.drag_end(false);
+    s.settle();
+    assert!(home.join("Documents/config.json").exists() && s.app.press.is_none());
+}
+
+#[test]
+fn tabs_torn_off_and_taken_in() {
+    let mut s = Sim::new();
+    s.open("Документы");
+    s.key_m(k::T, true, false, false);
+    s.open("Загрузки");
+    assert_eq!(s.app.tabs.len(), 2);
+    // Pull tab 2 down off the strip and let go outside any window: a window of its own.
+    let (tabs, _) = s.app.tab_rects();
+    let r = tabs[1];
+    s.app.motion(r.x as f64 + 40.0, 20.0);
+    s.app.button(LEFT, true);
+    s.app.motion(r.x as f64 + 40.0, 60.0);
+    assert!(starts(&s).is_empty(), "still on the strip");
+    s.app.motion(r.x as f64 + 40.0, 200.0);
+    let st = starts(&s);
+    assert!(matches!(&st[..], [WinReq::StartDrag { mimes, .. }] if mimes == &vec![dnd::TAB_MIME]));
+    let carried = dnd::tab_parse(&String::from_utf8(s.app.drag_data(dnd::TAB_MIME)).unwrap()).unwrap();
+    assert_eq!(carried.loc, Loc::Dir(s.home().join("Downloads")));
+    assert_eq!(carried.back, vec![Loc::Dir(s.home())], "its history goes with it");
+    open::DRY_LOG.lock().unwrap().clear();
+    s.app.dnd_leave();
+    s.app.drag_end(false);
+    s.settle();
+    assert_eq!(s.app.tabs.len(), 1);
+    let log = open::DRY_LOG.lock().unwrap().clone();
+    assert!(log.iter().any(|l| l.starts_with("ctl place-next resc.files")), "{log:?}");
+    assert!(log.iter().any(|l| l.starts_with("spawn") && l.contains("files --tab")), "{log:?}");
+    // A tab from another window over our strip: taken in where it is let go.
+    let t = Tab { loc: Loc::Dir(s.home().join("Music")), back: vec![Loc::Dir(s.home())], fwd: vec![], sel: vec![], scroll: 0.0 };
+    let (tabs, _) = s.app.tab_rects();
+    enter(&mut s, (tabs[0].x + 4) as f64, 20.0, dnd::TAB_MIME, dnd::tab_str(&t));
+    assert!(matches!(told(&s), Some(WinReq::DndAccept { mime: Some(m), .. }) if m == dnd::TAB_MIME));
+    assert_eq!(s.app.tab_drop_at, Some(0));
+    // Not over the content.
+    s.app.dnd_motion(500.0, 400.0);
+    assert!(matches!(told(&s), Some(WinReq::DndAccept { mime: None, .. })));
+    s.app.dnd_motion((tabs[0].x + 4) as f64, 20.0);
+    s.app.dnd_drop(dnd::MOVE);
+    s.settle();
+    assert_eq!(s.app.tabs.len(), 2);
+    assert_eq!(s.app.cur, 0);
+    assert_eq!(s.at(), Loc::Dir(s.home().join("Music")));
+    s.key_m(k::LEFT, false, false, true);
+    assert_eq!(s.at(), Loc::Dir(s.home()), "with its history");
+    // Our only tab dragged and let go away from any strip: the window moves there.
+    s.key_m(k::W, true, false, false);
+    assert_eq!(s.app.tabs.len(), 1);
+    open::DRY_LOG.lock().unwrap().clear();
+    let (tabs, _) = s.app.tab_rects();
+    s.app.motion(tabs[0].x as f64 + 40.0, 20.0);
+    s.app.button(LEFT, true);
+    s.app.motion(tabs[0].x as f64 + 40.0, 300.0);
+    s.app.drag_end(false);
+    s.settle();
+    let log = open::DRY_LOG.lock().unwrap().clone();
+    assert!(log.iter().any(|l| l.starts_with("ctl move-active")), "{log:?}");
+    assert!(!s.app.quit && s.app.tabs.len() == 1);
+}
+
+// ------------------------------------------------------------------ the desktop
+
+#[test]
+fn desktop_icons() {
+    let mut s = Sim::desk();
+    let desk = s.home().join("Desktop");
+    assert_eq!(s.at(), Loc::Dir(desk.clone()));
+    assert_eq!(s.app.view_rect(), Rect::new(0, 0, 1600, 836));
+    assert!(matches!(s.app.view.mode, Mode::Icons(48)));
+    // Column by column from the top left.
+    assert_eq!(s.app.rects[0].x, s.app.rects[1].x);
+    assert!(s.app.rects[1].y > s.app.rects[0].y);
+    // A folder opens in a window; the desktop stays where it is.
+    open::DRY_LOG.lock().unwrap().clear();
+    s.open("Проекты 2026");
+    assert_eq!(s.at(), Loc::Dir(desk.clone()));
+    let log = open::DRY_LOG.lock().unwrap().clone();
+    assert!(log.iter().any(|l| l.starts_with("spawn") && l.contains(" files ") && l.contains("Проекты 2026")), "{log:?}");
+    // Window and tab keys do nothing here; the desktop can't be closed.
+    for (c, ctrl, alt) in [(k::W, true, false), (k::T, true, false), (k::LEFT, false, true), (k::UP, false, true), (k::BACKSPACE, false, false)] {
+        s.key_m(c, ctrl, false, alt);
+        assert_eq!(s.at(), Loc::Dir(desk.clone()));
+        assert!(!s.app.quit && s.app.tabs.len() == 1);
+    }
+    // Its own menu on the wallpaper.
+    s.click_b(RIGHT, 900.0, 700.0, "right click the wallpaper");
+    let m = s.app.menu.as_ref().unwrap_or_else(|| s.fail("no menu"));
+    assert!(m.items.iter().any(|i| i.label == "Персонализация"));
+    s.key(k::ESC);
+    // New folder, named in place.
+    s.key_m(k::N, true, true, false);
+    for c in [20, 18, 31, 20] {
+        s.key(c);
+    }
+    s.key(k::ENTER);
+    assert!(desk.join("test").is_dir());
+    // Files dropped from a window onto the wallpaper land here.
+    write(&s.home().join("Downloads/z.txt"), "z");
+    let z = open::uri_of(&s.home().join("Downloads/z.txt"));
+    enter(&mut s, 900.0, 600.0, dnd::URI_MIME, z);
+    s.app.dnd_drop(dnd::COPY);
+    s.settle();
+    assert!(desk.join("z.txt").exists());
+}
+
+#[test]
+fn desktop_monkey() {
+    let seeds: u64 = std::env::var("MONKEY").ok().and_then(|v| v.parse().ok()).map(|n: u64| (n / 4).max(1)).unwrap_or(6);
+    for seed in 1..=seeds {
+        let mut s = Sim::desk();
+        let desk = s.home().join("Desktop");
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 77);
+        s.log.push(format!("desktop monkey seed {seed}"));
+        for _ in 0..300 {
+            let (w, h) = (s.app.w as f64, s.app.h as f64);
+            let (x, y) = ((rng.below(1000) as f64 / 1000.0) * w, (rng.below(1000) as f64 / 1000.0) * h);
+            match rng.below(9) {
+                0..=2 => s.click_b(LEFT, x, y, "click"),
+                3 => s.click_b(RIGHT, x, y, "right"),
+                4 => {
+                    s.app.last_click = (0, Hit::None);
+                    s.log.push(format!("double {x:.0},{y:.0}"));
+                    s.press(LEFT, x, y);
+                    s.press(LEFT, x, y);
+                    s.settle();
+                }
+                5 => s.key_m([k::A, k::C, k::V, k::Z, k::W, k::T, k::N][rng.below(7)], true, rng.below(3) == 0, false),
+                6 => s.key_m([k::LEFT, k::UP, k::RIGHT][rng.below(3)], false, false, true),
+                _ => s.key([k::UP, k::DOWN, k::LEFT, k::RIGHT, k::ENTER, k::ESC, k::F2, k::F5, k::DELETE, k::BACKSPACE, 30, 49][rng.below(12)]),
+            }
+            if s.app.dialog.is_some() && rng.below(2) == 0 {
+                s.key(k::ESC);
+            }
+            if s.at() != Loc::Dir(desk.clone()) {
+                s.fail("the desktop went somewhere else");
+            }
+            if s.app.quit || s.app.tabs.len() != 1 {
+                s.fail("the desktop closed or grew tabs");
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------ monkey
 
 #[test]
@@ -776,7 +1070,73 @@ fn monkey() {
             let (w, h) = (s.app.w as f64, s.app.h as f64);
             let x = (rng.below(1000) as f64 / 1000.0) * w;
             let y = (rng.below(1000) as f64 / 1000.0) * h;
-            match rng.below(16) {
+            match rng.below(19) {
+                16 => {
+                    // Something dragged out of the window; the system drag ends somehow.
+                    s.log.push(format!("monkey drag out from {x:.0},{y:.0}"));
+                    s.app.winreq.clear();
+                    s.app.motion(x, y);
+                    s.app.button([LEFT, RIGHT][rng.below(2)], true);
+                    s.app.motion(x + 20.0, y + 10.0);
+                    s.app.motion(-30.0, y);
+                    if starts(&s).is_empty() {
+                        let b = s.app.press.as_ref().map_or(LEFT, |p| p.button);
+                        s.app.button(b, false);
+                    } else {
+                        if rng.below(2) == 0 {
+                            let (x2, y2) = ((rng.below(1000) as f64 / 1000.0) * w, (rng.below(1000) as f64 / 1000.0) * h);
+                            let mut read = |_: &str| -> Option<Vec<u8>> { None };
+                            s.app.dnd_enter(x2, y2, &[dnd::URI_MIME.to_string()], &mut read);
+                            s.check();
+                            if rng.below(2) == 0 {
+                                s.app.dnd_drop([dnd::COPY, dnd::MOVE, dnd::ASK][rng.below(3)]);
+                            } else {
+                                s.app.dnd_leave();
+                            }
+                        }
+                        s.app.drag_end(rng.below(2) == 0);
+                    }
+                    s.settle();
+                }
+                17 => {
+                    // Files from elsewhere (or a tab) dropped somewhere on the window.
+                    let tab = rng.below(3) == 0;
+                    let (mime, data) = if tab {
+                        (dnd::TAB_MIME, dnd::tab_str(&Tab { loc: Loc::Dir(s.home().join("Music")), back: vec![], fwd: vec![], sel: vec![], scroll: 0.0 }))
+                    } else {
+                        let n = format!("in{}.txt", rng.below(1000));
+                        let p = s.root.join("outside").join(&n);
+                        write(&p, "x");
+                        (dnd::URI_MIME, open::uri_of(&p))
+                    };
+                    enter(&mut s, x, y, mime, data);
+                    s.check();
+                    let (x2, y2) = ((rng.below(1000) as f64 / 1000.0) * w, (rng.below(1000) as f64 / 1000.0) * h);
+                    s.app.dnd_motion(x2, y2);
+                    s.check();
+                    if rng.below(3) == 0 {
+                        s.app.dnd_leave();
+                    } else {
+                        s.app.dnd_drop([dnd::COPY, dnd::MOVE, dnd::ASK][rng.below(3)]);
+                    }
+                    s.settle();
+                }
+                18 => {
+                    // A tab pulled off the strip.
+                    let (tabs, _) = s.app.tab_rects();
+                    let t = tabs[rng.below(tabs.len())];
+                    s.log.push("monkey tab out".into());
+                    s.app.winreq.clear();
+                    s.app.motion(t.x as f64 + 30.0, 20.0);
+                    s.app.button(LEFT, true);
+                    s.app.motion(t.x as f64 + 30.0, 250.0);
+                    if starts(&s).is_empty() {
+                        s.app.button(LEFT, false);
+                    } else {
+                        s.app.drag_end(rng.below(2) == 0);
+                    }
+                    s.settle();
+                }
                 0..=3 => s.click_b(LEFT, x, y, "monkey click"),
                 4 => {
                     s.log.push(format!("monkey double {x:.0},{y:.0}"));

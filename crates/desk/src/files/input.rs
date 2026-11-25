@@ -207,6 +207,13 @@ impl App {
 
     pub fn hit(&self, x: f64, y: f64) -> Hit {
         let (xi, yi) = (x as i32, y as i32);
+        if self.desk && self.ops.is_empty() {
+            return match self.item_at(x, y) {
+                Some(i) => Hit::Item(i),
+                None if self.view_rect().contains(x, y) => Hit::Empty,
+                None => Hit::None,
+            };
+        }
         if !self.ops.is_empty() {
             let (r, rows) = self.ops_rects();
             if r.contains(x, y) {
@@ -382,7 +389,7 @@ impl App {
             }
             return;
         };
-        let (px, py, phit, mut pdrag, scroll0, col_w0) = (p0.x, p0.y, p0.hit, p0.dragging, p0.scroll0, p0.col_w0);
+        let (px, py, phit, mut pdrag, scroll0, col_w0, p_button) = (p0.x, p0.y, p0.hit, p0.dragging, p0.scroll0, p0.col_w0, p0.button);
         let (dx, dy) = (x - px, y - py);
         let far = dx * dx + dy * dy > 25.0;
         match phit {
@@ -394,7 +401,7 @@ impl App {
                         p.defer = false;
                     }
                 }
-                if pdrag {
+                if pdrag && !self.maybe_drag_out(x, y, p_button == BTN_RIGHT) && self.outgoing.is_none() {
                     self.drag_target(x, y);
                 }
             }
@@ -427,6 +434,14 @@ impl App {
                     self.scroll.to((self.scroll.target + 20.0).min(m));
                 }
             }
+            Hit::Tab(i) if p_button == BTN_LEFT && self.outgoing.is_none() && (y < -12.0 || y > (TABS_H + 28) as f64 || x < -12.0 || x > self.w as f64 + 12.0) => {
+                // Pulled off the strip: to another window, or a window of its own.
+                let grab = if self.tabs.len() > 1 { (90, 20) } else { (px as i32, py as i32) };
+                if let Some(p) = self.press.as_mut() {
+                    p.dragging = true;
+                }
+                self.drag_out_tab(i, grab.0, grab.1);
+            }
             Hit::Head(i) if i > 0 && (far || pdrag) => {
                 // Dragging a header moves the column («Имя» stays first).
                 if let Some(p) = self.press.as_mut() {
@@ -452,13 +467,18 @@ impl App {
     }
 
     /// While dragging items: what is under the pointer and what a drop would do.
-    fn drag_target(&mut self, x: f64, y: f64) {
+    pub fn drag_target(&mut self, x: f64, y: f64) {
         let h = self.hit(x, y);
         let target = match h {
-            Hit::Item(i) if self.items[i].e.dir && !self.sel[i] && !matches!(self.loc(), Loc::Arc(..) | Loc::Trash) => Some(Loc::Dir(self.items[i].e.path.clone())),
+            Hit::Item(i) if self.items[i].e.dir && (!self.sel[i] || self.incoming.as_ref().map_or(false, |i| !i.own)) && !matches!(self.loc(), Loc::Arc(..) | Loc::Trash) && !self.drag_paths().contains(&self.items[i].e.path) => Some(Loc::Dir(self.items[i].e.path.clone())),
             Hit::Nav(i) => Some(self.nav[i].loc.clone()).filter(|l| matches!(l, Loc::Dir(_) | Loc::Trash)),
             Hit::Tab(i) => Some(self.tabs[i].loc.clone()).filter(|l| matches!(l, Loc::Dir(_))),
-            Hit::Empty | Hit::Item(_) => self.loc().dir().map(|d| Loc::Dir(d.to_path_buf())).filter(|_| matches!(h, Hit::Empty)).filter(|_| false),
+            // Into this folder: only things from elsewhere (not its own items).
+            Hit::Empty | Hit::Item(_) if self.incoming.as_ref().map_or(false, |i| !i.own) && !matches!(self.loc(), Loc::Arc(..) | Loc::Search(..)) => {
+                let here = self.loc().dir().map(Path::to_path_buf);
+                let paths = self.drag_paths();
+                here.filter(|d| !paths.iter().all(|p| p.parent() == Some(d.as_path()))).map(Loc::Dir)
+            }
             _ => None,
         };
         let spring = matches!(h, Hit::Item(_) | Hit::Nav(_)) && target.is_some();
@@ -474,7 +494,7 @@ impl App {
             }
         }
         self.drag_to = target.map(|t| {
-            let first = self.sel_paths().first().cloned().unwrap_or_default();
+            let first = self.drag_paths().first().cloned().unwrap_or_default();
             let eff = self.drag_effect(&first, &t);
             (t, eff)
         });
@@ -488,6 +508,14 @@ impl App {
                 self.ndrop.go(r);
             }
             _ => self.ndrop.hide(),
+        }
+    }
+
+    /// What is being dragged: files from elsewhere, or the selection.
+    pub fn drag_paths(&self) -> Vec<PathBuf> {
+        match &self.incoming {
+            Some(i) if !i.own => i.paths.clone(),
+            _ => self.sel_paths(),
         }
     }
 
@@ -827,13 +855,8 @@ impl App {
         if p.dragging {
             let Some((to, eff)) = self.drag_to.clone() else { return };
             if p.button == BTN_RIGHT {
-                let m = vec![
-                    MItem::new("Копировать сюда", Act::DropCopy).bold(),
-                    MItem::new("Переместить сюда", Act::DropMove).on(!matches!(self.loc(), Loc::Arc(..))),
-                    MItem::new("Создать ярлыки", Act::DropLink).on(!matches!(self.loc(), Loc::Arc(..))),
-                    MItem::sep(),
-                    MItem::new("Отмена", Act::None),
-                ];
+                self.drop_paths = None;
+                let m = self.drop_menu();
                 if to != Loc::Trash {
                     self.open_menu(m, x as i32, y as i32);
                     return;
@@ -890,6 +913,7 @@ impl App {
     }
 
     pub fn drop_on(&mut self, to: Loc, eff: Act) {
+        self.drop_paths = None;
         self.drag_to = Some((to.clone(), eff.clone()));
         match eff {
             Act::Trash => {

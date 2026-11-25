@@ -81,7 +81,7 @@ fn windows_of(d: &Desk, ws: u32) -> Vec<WKey> {
     // Most recently used first, then the rest (never focused).
     let ok = |k: &WKey| {
         let w = &d.windows[*k];
-        w.workspace == ws && w.parent.is_none() && d.surfaces.get(w.surf).map_or(false, |s| s.mapped)
+        w.workspace == ws && w.parent.is_none() && !w.desktop() && d.surfaces.get(w.surf).map_or(false, |s| s.mapped)
     };
     let mut v: Vec<WKey> = d.mru.iter().copied().filter(|k| d.windows.contains(*k) && ok(k)).collect();
     for (k, _) in d.windows.iter() {

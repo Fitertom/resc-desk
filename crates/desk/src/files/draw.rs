@@ -16,6 +16,14 @@ pub fn draw(app: &App, cv: &mut Canvas) {
     let (w, h) = (app.w, app.h);
     let all = cv.bounds();
     cv.clear(all);
+    if app.desk {
+        // Only the icons, on the wallpaper (menus and dialogs: `overlay`).
+        content(app, cv);
+        drag_ghost(app, cv);
+        ops_card(app, cv);
+        toast(app, cv);
+        return;
+    }
     cv.fill(all, Rect::new(0, 0, w, TABS_H), BG_TABS);
     cv.fill(all, Rect::new(0, TABS_H, w, TOP - TABS_H), BG_BAR);
     cv.fill(all, Rect::new(0, TOP, NAV_W, h - TOP), BG_NAV);
@@ -31,6 +39,20 @@ pub fn draw(app: &App, cv: &mut Canvas) {
     drag_ghost(app, cv);
     ops_card(app, cv);
     toast(app, cv);
+    if let Some(m) = &app.menu {
+        menu(app, cv, m);
+        if let Some((_, s)) = &m.sub {
+            menu(app, cv, s);
+        }
+    }
+    if let Some(d) = &app.dialog {
+        dialog(app, cv, d);
+    }
+}
+
+/// The desktop's menus and dialogs, drawn over every window.
+pub fn overlay(app: &App, cv: &mut Canvas) {
+    cv.clear(cv.bounds());
     if let Some(m) = &app.menu {
         menu(app, cv, m);
         if let Some((_, s)) = &m.sub {
@@ -125,6 +147,11 @@ fn tabs(app: &App, cv: &mut Canvas) {
         if act || hov(app, Hit::Tab(i)) || hov(app, Hit::TabClose(i)) {
             glyph(cv, clip, x.inflate(-6), G::Close, DIM);
         }
+    }
+    // A tab from another window over the strip: where it would go.
+    if let Some(at) = app.tab_drop_at {
+        let x = rects.get(at).map_or(plus.x - 2, |r| r.x - 2);
+        cv.rrect(clip, Rect::new(x, 6, 3, TABS_H - 12), 1, ACCENT);
     }
     btn_bg(cv, clip, plus, hov(app, Hit::NewTab), false);
     glyph(cv, clip, plus.inflate(-8), G::Plus, DIM);
@@ -387,7 +414,7 @@ fn content(app: &App, cv: &mut Canvas) {
         ui::text_c(cv, clip, Rect::new(vr.x, vr.y + 30, vr.w, 30), e, 13.5, DIM, W::Text);
         return;
     }
-    if app.items.is_empty() {
+    if app.items.is_empty() && !app.desk {
         let msg = match app.loc() {
             Loc::Search(..) if app.searching => "Поиск…",
             Loc::Search(..) => "Ничего не найдено.",
@@ -440,7 +467,7 @@ fn content(app: &App, cv: &mut Canvas) {
         let renaming = app.rename.as_ref().filter(|x| x.0 == i).map(|x| &x.1);
         match app.view.mode {
             Mode::Details => row(app, cv, clip, r, it, faded, renaming),
-            Mode::Icons(s) => tile_icon(cv, clip, r, s, it, faded, app.sel[i], renaming),
+            Mode::Icons(s) => tile_icon(cv, clip, r, s, it, faded, app.desk, renaming),
             Mode::Tiles => tile_pc(cv, clip, r, it),
         }
     }
@@ -515,7 +542,7 @@ fn two_lines(s: &str, size: f32, w: i32) -> Vec<String> {
     vec![a.trim_end().to_string(), b.trim_start().to_string()]
 }
 
-fn tile_icon(cv: &mut Canvas, clip: Rect, r: Rect, s: i32, it: &Item, faded: bool, sel: bool, renaming: Option<&TextField>) {
+fn tile_icon(cv: &mut Canvas, clip: Rect, r: Rect, s: i32, it: &Item, faded: bool, wall: bool, renaming: Option<&TextField>) {
     let ic = Rect::new(r.x + (r.w - s) / 2, r.y + 8, s, s);
     item_icon(cv, clip, ic, it);
     if faded {
@@ -529,10 +556,18 @@ fn tile_icon(cv: &mut Canvas, clip: Rect, r: Rect, s: i32, it: &Item, faded: boo
         tf.draw(cv, fr.intersect(&clip), ui::XF, fr.x + 4, fr.y + 16, fr.w - 8, 12.5, FG, W::Text);
         return;
     }
-    let lines = if sel { two_lines(&it.disp, 12.5, r.w - 8) } else { two_lines(&it.disp, 12.5, r.w - 8) };
+    let lines = two_lines(&it.disp, 12.5, r.w - 8);
     for (k, l) in lines.iter().enumerate() {
         let lw = tw(l, 12.5).min(r.w - 8);
-        text(cv, clip, r.x + (r.w - lw) / 2, ty + k as i32 * 17, l, 12.5, fade_col(FG, faded), r.w - 8);
+        let (x, y) = (r.x + (r.w - lw) / 2, ty + k as i32 * 17);
+        if wall {
+            // On the wallpaper: white with a soft shadow, as Windows does.
+            text(cv, clip, x + 1, y + 1, l, 12.5, argb(170, 0, 0, 0), r.w - 8);
+            text(cv, clip, x, y + 2, l, 12.5, argb(60, 0, 0, 0), r.w - 8);
+            text(cv, clip, x, y, l, 12.5, fade_col(argb(255, 255, 255, 255), faded), r.w - 8);
+        } else {
+            text(cv, clip, x, y, l, 12.5, fade_col(FG, faded), r.w - 8);
+        }
     }
 }
 
@@ -594,7 +629,75 @@ fn status(app: &App, cv: &mut Canvas) {
 
 // ------------------------------------------------------------------ floating
 
+/// The picture under the pointer when items leave the window (the system drag).
+pub fn drag_icon(app: &App) -> Option<(Vec<u32>, i32, i32, i32, i32)> {
+    let sel = app.selected();
+    let &first = sel.first()?;
+    let (w, h) = (84, 66);
+    let mut px = vec![0u32; (w * h) as usize];
+    {
+        let mut cv = Canvas { px: &mut px, w, h, stride: w as usize };
+        let clip = cv.bounds();
+        let ic = Rect::new(16, 20, 40, 40);
+        card(&mut cv, clip, ic.inflate(4), 10, argb(200, 30, 32, 43));
+        item_icon(&mut cv, clip, ic, &app.items[first]);
+        if sel.len() > 1 {
+            let t = sel.len().to_string();
+            let bw = tw(&t, 11.0) + 12;
+            let b = Rect::new(ic.x1() - bw / 2, ic.y - 10, bw, 18);
+            cv.rrect(clip, b, 9, ACCENT);
+            ui::text_c(&mut cv, clip, b, &t, 11.0, argb(255, 12, 22, 40), W::Bold);
+        }
+    }
+    Some((px, w, h, 36, 34))
+}
+
+/// A tab being dragged out: the tab itself.
+pub fn tab_icon(app: &App, i: usize) -> Option<(Vec<u32>, i32, i32, i32, i32)> {
+    let t = app.tabs.get(i)?;
+    let title = app.loc_title(&t.loc);
+    let w = (tw(&title, 12.5) + 64).clamp(150, 280);
+    let h = 40;
+    let mut px = vec![0u32; (w * h) as usize];
+    {
+        let mut cv = Canvas { px: &mut px, w, h, stride: w as usize };
+        let clip = cv.bounds();
+        let r = Rect::new(2, 2, w - 4, h - 4);
+        cv.rrect(clip, r, 9, argb(245, 40, 42, 55));
+        cv.rrect_stroke(clip, r, 9, 1.0, 0xffffff, 50, 30);
+        let ic = Rect::new(r.x + 12, r.y + 10, 16, 16);
+        if !icon(&mut cv, clip, ic, &loc_icon(app, &t.loc)) {
+            ui::folder_shape(&mut cv, clip, ic);
+        }
+        text(&mut cv, clip, ic.x1() + 9, r.y + 23, &title, 12.5, FG, r.w - 44);
+    }
+    Some((px, w, h, 60, 20))
+}
+
+/// Over the window during a system drag: only what a drop would do (the picture is the
+/// compositor's).
+fn drop_label(app: &App, cv: &mut Canvas) {
+    let Some((x, y)) = app.ptr else { return };
+    let Some((to, eff)) = &app.drag_to else { return };
+    let name = app.loc_title(to);
+    let label = match eff {
+        Act::Trash => format!("Удалить в «{name}»"),
+        Act::DropMove => format!("→ Переместить в «{name}»"),
+        Act::DropLink => format!("↗ Создать ярлык в «{name}»"),
+        _ => format!("+ Копировать в «{name}»"),
+    };
+    let clip = cv.bounds();
+    let lw = tw(&label, 12.0) + 20;
+    let lr = Rect::new(x as i32 + 8, y as i32 + 36, lw, 26);
+    card(cv, clip, lr, 7, argb(235, 30, 32, 43));
+    text(cv, clip, lr.x + 10, lr.y + 18, &label, 12.0, FG, lw);
+}
+
 fn drag_ghost(app: &App, cv: &mut Canvas) {
+    if app.outgoing.is_some() || app.incoming.as_ref().map_or(false, |i| !i.own) {
+        drop_label(app, cv);
+        return;
+    }
     let Some(p) = &app.press else { return };
     if !p.dragging {
         return;
@@ -740,12 +843,15 @@ fn toast(app: &App, cv: &mut Canvas) {
 // ------------------------------------------------------------------ menus
 
 fn menu(app: &App, cv: &mut Canvas, m: &Menu) {
-    let _ = app;
     let full = m.rect();
     let t = m.t.value.clamp(0.0, 1.2);
     // Windows 11: the menu unrolls from the top edge.
     let h = ((full.h as f32) * t.min(1.0)).round() as i32;
     let clip = Rect::new(full.x - 12, full.y - 12, full.w + 24, h + 24).intersect(&cv.bounds());
+    if app.desk {
+        // Over other windows (the desktop's overlay): solid, not see-through.
+        cv.rrect(clip, full, 9, argb(255, 30, 32, 43));
+    }
     card(cv, clip, full, 9, argb(244, 30, 32, 43));
     let inner = Rect::new(full.x, full.y, full.w, h);
     for (i, it) in m.items.iter().enumerate() {
@@ -888,10 +994,16 @@ pub fn dialog_buttons(d: &Dialog, r: Rect) -> Vec<Rect> {
 fn dialog(app: &App, cv: &mut Canvas, d: &Dialog) {
     let all = cv.bounds();
     let t = d.t.value.clamp(0.0, 1.0);
-    cv.fill(all, all, argb((90.0 * t) as u32, 0, 0, 0));
+    if !app.desk {
+        cv.fill(all, all, argb((90.0 * t) as u32, 0, 0, 0));
+    }
     let r0 = dialog_rect(d, app.w, app.h);
     // Rises a little while it comes.
     let r = r0.translate(0, ((1.0 - d.t.value) * 18.0).round() as i32);
+    if app.desk {
+        // Over other windows: solid, like a window of its own.
+        cv.rrect(all, r, 12, argb(255, 30, 32, 43));
+    }
     card(cv, all, r, 12, argb(248, 30, 32, 43));
     cv.fill(all, Rect::new(r.x, r.y1() - 70, r.w, 1), white(14));
     cv.rrect(all, Rect::new(r.x + 1, r.y1() - 69, r.w - 2, 68), 11, argb(60, 0, 0, 0));

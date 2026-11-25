@@ -317,7 +317,7 @@ fn scaled(r: Rect, k: f32) -> Rect {
 /// goes away as when it closes.
 pub fn snapshot(d: &mut Desk, wk: WKey) {
     let Some(w) = d.windows.get(wk) else { return };
-    if w.parent.is_some() || d.surfaces.get(w.surf).map_or(true, |s| s.buffer.is_none() || !s.mapped) {
+    if w.parent.is_some() || w.desktop() || d.surfaces.get(w.surf).map_or(true, |s| s.buffer.is_none() || !s.mapped) {
         return;
     }
     let (ox, oy) = (w.x, w.y);
@@ -454,7 +454,7 @@ pub fn bar(d: &Desk) -> Vec<(Key, f32, f32)> {
     let mut wins: Vec<WKey> = d
         .windows
         .iter()
-        .filter(|(_, w)| w.workspace == d.workspace && d.surfaces.get(w.surf).map_or(false, |s| s.mapped) && w.parent.is_none())
+        .filter(|(_, w)| w.workspace == d.workspace && d.surfaces.get(w.surf).map_or(false, |s| s.mapped) && w.parent.is_none() && !w.desktop())
         .map(|(k, _)| k)
         .collect();
     let mut v = Vec::with_capacity(wins.len() + 2);

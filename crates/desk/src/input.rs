@@ -71,6 +71,8 @@ pub enum Grab {
     Shell,
     /// Click that dismissed popups: swallow until release.
     Swallow,
+    /// A drag and drop between programs (dnd.rs).
+    Dnd,
 }
 
 pub struct Seat {
@@ -183,7 +185,7 @@ fn send_button(d: &mut Desk, sk: SKey, time: u32, button: u32, pressed: bool) {
     }
 }
 
-fn set_ptr_focus(d: &mut Desk, new: Option<(SKey, f64, f64)>) {
+pub fn set_ptr_focus(d: &mut Desk, new: Option<(SKey, f64, f64)>) {
     let old = d.seat.ptr_focus;
     if old == new.map(|n| n.0) {
         return;
@@ -234,6 +236,7 @@ pub fn pointer_motion(d: &mut Desk, x: f64, y: f64, time: u32) {
             crate::taskview::drag(d, x, y);
         }
         Grab::Deco { .. } | Grab::Swallow => {}
+        Grab::Dnd => crate::dnd::motion(d, time),
         Grab::None => hover(d, time),
     }
     shell::pointer_hover(d);
@@ -374,6 +377,10 @@ pub fn pointer_button(d: &mut Desk, button: u32, pressed: bool, time: u32) {
                     _ => {}
                 }
             }
+            hover(d, time);
+        }
+        Grab::Dnd if last => {
+            crate::dnd::release(d);
             hover(d, time);
         }
         Grab::Shell | Grab::Swallow if last => {
@@ -521,6 +528,9 @@ pub fn pointer_axis(d: &mut Desk, time: u32, axis: u32, value: f64, v120: Option
 // ------------------------------------------------------------------ move / resize grabs
 
 pub fn begin_move(d: &mut Desk, wk: WKey) {
+    if d.windows.get(wk).map_or(true, |w| w.desktop()) {
+        return;
+    }
     if d.seat.buttons.is_empty() || !d.windows.contains(wk) {
         return;
     }
@@ -531,6 +541,9 @@ pub fn begin_move(d: &mut Desk, wk: WKey) {
 }
 
 pub fn begin_resize(d: &mut Desk, wk: WKey, edges: u32) {
+    if d.windows.get(wk).map_or(true, |w| w.desktop()) {
+        return;
+    }
     if d.seat.buttons.is_empty() || !d.windows.contains(wk) || edges == 0 {
         return;
     }
@@ -745,6 +758,12 @@ fn keys_array(keys: &[u32]) -> Vec<u8> {
     keys.iter().flat_map(|k| k.to_ne_bytes()).collect()
 }
 
+/// Shift / Ctrl / Alt held now (M_* bits), from the host or our own keys.
+pub fn held_mods(d: &Desk) -> u32 {
+    let m = current_mods(d)[0];
+    (if m & 1 != 0 { M_SHIFT } else { 0 }) | (if m & 4 != 0 { M_CTRL } else { 0 }) | (if m & 8 != 0 { M_ALT } else { 0 })
+}
+
 fn current_mods(d: &Desk) -> [u32; 4] {
     let h = d.seat.held;
     if let Some(mut m) = d.seat.host_mods {
@@ -848,6 +867,16 @@ pub fn key(d: &mut Desk, code: u32, pressed: bool, time: u32) {
         d.seat.held |= bit;
     } else {
         d.seat.held &= !bit;
+    }
+    // During a drag: Esc cancels it; Shift / Ctrl change copy ↔ move.
+    if d.seat.grab == Grab::Dnd {
+        if code == 1 && pressed {
+            crate::dnd::cancel(d);
+            return;
+        }
+        if bit != 0 {
+            crate::dnd::choose(d);
+        }
     }
     if pressed && d.seat.host_mods.is_none() {
         match code {
@@ -1144,6 +1173,7 @@ pub fn damage_cursor(d: &mut Desk) {
 
 /// A surface died: drop every reference the seat holds to it.
 pub fn surface_gone(d: &mut Desk, sk: SKey) {
+    crate::dnd::surface_gone(d, sk);
     if d.seat.ptr_focus == Some(sk) {
         d.seat.ptr_focus = None;
     }

@@ -21,6 +21,15 @@ enum K {
     Seat,
     Pointer,
     Keyboard,
+    DataDevice,
+    /// A data offer (a drag coming in, or the clipboard).
+    Offer,
+    /// Our own drag's data source.
+    Source,
+    /// The overlay popup (xdg_surface / xdg_popup).
+    OverXdg,
+    OverPopup,
+    OverBuf(usize),
     Other,
 }
 
@@ -37,6 +46,31 @@ pub enum Ev {
     Key(u32, bool),
     /// The modifiers changed (in order with the keys: Alt down, Left, Alt up).
     Mods(crate::textedit::Mods),
+    /// A drag from somewhere (another program, or our own) came over the window: its
+    /// types and the actions its source allows (COPY 1, MOVE 2, ASK 4).
+    DndEnter { x: f64, y: f64, mimes: Vec<String>, actions: u32 },
+    DndMotion(f64, f64),
+    DndLeave,
+    /// Dropped here: read with `dnd_receive`, then `dnd_finish`.
+    DndDrop,
+    /// Our drag: a target wants the data as `mime`, written to the fd.
+    DragSend(String, OwnedFd),
+    /// Our drag: the action the target chose.
+    DragAction(u32),
+    /// Our drag ended: dropped and read (true), or nobody took it / cancelled (false).
+    DragEnd(bool),
+    /// The overlay was dismissed (a click outside it).
+    OverlayDone,
+}
+
+/// A popup as big as the window, over every other window (the desktop's menus and
+/// dialogs): only `input` rects take the pointer.
+struct Overlay {
+    surf: ObjId,
+    xdg: ObjId,
+    popup: ObjId,
+    bufs: Vec<Buf>,
+    configured: bool,
 }
 
 struct Buf {
@@ -80,6 +114,20 @@ pub struct Window {
     pending_max: bool,
     /// Maximized by the compositor (the caption button shows "restore").
     pub maximized: bool,
+    ddm: ObjId,
+    ddev: ObjId,
+    /// The offer of the drag over us now, its types, and the enter serial.
+    offer: ObjId,
+    offers: HashMap<ObjId, (Vec<String>, u32)>,
+    enter_serial: u32,
+    /// Our own drag: its source, icon surface and buffer.
+    drag: Option<(ObjId, ObjId, Option<Buf>)>,
+    drag_action: u32,
+    drag_dropped: bool,
+    offer_action: u32,
+    overlay: Option<Overlay>,
+    /// The surface the pointer is on.
+    ptr_surf: ObjId,
 }
 
 /// evdev codes of the modifier keys (they don't repeat).
@@ -131,6 +179,17 @@ impl Window {
             btn_serial: 0,
             pending_max: false,
             maximized: false,
+            ddm: 0,
+            ddev: 0,
+            offer: 0,
+            offers: HashMap::new(),
+            enter_serial: 0,
+            drag: None,
+            drag_action: 0,
+            drag_dropped: false,
+            offer_action: 0,
+            overlay: None,
+            ptr_surf: 0,
         };
         let reg = n.new_id(K::Registry);
         wl_display::req::get_registry(&mut n.conn, 1, reg);
@@ -144,6 +203,11 @@ impl Window {
         n.wm_base = n.bind(reg, wname, "xdg_wm_base", wver.min(3), K::WmBase);
         if let Some((name, ver)) = find(&n, "wl_seat") {
             n.seat = n.bind(reg, name, "wl_seat", ver.min(5), K::Seat);
+            if let Some((dname, dver)) = find(&n, "wl_data_device_manager") {
+                n.ddm = n.bind(reg, dname, "wl_data_device_manager", dver.min(3), K::Other);
+                n.ddev = n.new_id(K::DataDevice);
+                wl_data_device_manager::req::get_data_device(&mut n.conn, n.ddm, n.ddev, n.seat);
+            }
         }
         n.surface = n.new_id(K::Other);
         wl_compositor::req::create_surface(&mut n.conn, n.compositor, n.surface);
@@ -155,7 +219,7 @@ impl Window {
         xdg_toplevel::req::set_app_id(&mut n.conn, n.top, app_id);
         xdg_toplevel::req::set_min_size(&mut n.conn, n.top, min.0, min.1);
         // The compositor's frame (title bar, buttons, shadow) rather than our own.
-        if let Some((name, _)) = find(&n, "zxdg_decoration_manager_v1") {
+        if let Some((name, _)) = find(&n, "zxdg_decoration_manager_v1").filter(|_| app_id != "resc.desktop") {
             let mgr = n.bind(reg, name, "zxdg_decoration_manager_v1", 1, K::Other);
             let deco = n.new_id(K::Other);
             zxdg_decoration_manager_v1::req::get_toplevel_decoration(&mut n.conn, mgr, deco, n.top);
@@ -333,8 +397,311 @@ impl Window {
                 }
                 _ => {}
             },
+            K::DataDevice => match ev!(wl_data_device) {
+                wl_data_device::Event::DataOffer { id } => {
+                    self.objs.insert(id, K::Offer);
+                    self.offers.insert(id, (vec![], 0));
+                }
+                wl_data_device::Event::Enter { serial, surface: _, x, y, id } => {
+                    self.enter_serial = serial;
+                    self.offer = id;
+                    self.offer_action = 0;
+                    let (mimes, actions) = self.offers.get(&id).cloned().unwrap_or_default();
+                    self.events.push(Ev::DndEnter { x: x.to_f64(), y: y.to_f64(), mimes, actions });
+                }
+                wl_data_device::Event::Motion { x, y, .. } => self.events.push(Ev::DndMotion(x.to_f64(), y.to_f64())),
+                wl_data_device::Event::Leave => {
+                    self.drop_offer();
+                    self.events.push(Ev::DndLeave);
+                }
+                wl_data_device::Event::Drop => self.events.push(Ev::DndDrop),
+                wl_data_device::Event::Selection { id } => {
+                    // The clipboard: not read this way (yet); let the offer go.
+                    if id != 0 && id != self.offer {
+                        wl_data_offer::req::destroy(&mut self.conn, id);
+                        self.offers.remove(&id);
+                    }
+                }
+            },
+            K::Offer => {
+                let id = h.obj;
+                match ev!(wl_data_offer) {
+                    wl_data_offer::Event::Offer { mime_type } => {
+                        if let Some(o) = self.offers.get_mut(&id) {
+                            o.0.push(mime_type);
+                        }
+                    }
+                    wl_data_offer::Event::SourceActions { source_actions } => {
+                        if let Some(o) = self.offers.get_mut(&id) {
+                            o.1 = source_actions;
+                        }
+                    }
+                    wl_data_offer::Event::Action { dnd_action } => {
+                        if id == self.offer {
+                            self.offer_action = dnd_action;
+                        }
+                    }
+                }
+            }
+            K::Source => match ev!(wl_data_source) {
+                wl_data_source::Event::Send { mime_type, fd } => self.events.push(Ev::DragSend(mime_type, fd)),
+                wl_data_source::Event::Action { dnd_action } => {
+                    self.drag_action = dnd_action;
+                    self.events.push(Ev::DragAction(dnd_action));
+                }
+                wl_data_source::Event::DndDropPerformed => self.drag_dropped = true,
+                wl_data_source::Event::DndFinished => self.end_drag(true),
+                wl_data_source::Event::Cancelled => self.end_drag(false),
+                _ => {}
+            },
+            K::OverXdg => {
+                if let xdg_surface::Event::Configure { serial } = ev!(xdg_surface) {
+                    if let Some(o) = self.overlay.as_mut() {
+                        xdg_surface::req::ack_configure(&mut self.conn, o.xdg, serial);
+                        o.configured = true;
+                    }
+                }
+            }
+            K::OverPopup => {
+                if let xdg_popup::Event::PopupDone = ev!(xdg_popup) {
+                    self.overlay_hide();
+                    self.events.push(Ev::OverlayDone);
+                }
+            }
+            K::OverBuf(i) => {
+                if let Some(b) = self.overlay.as_mut().and_then(|o| o.bufs.get_mut(i)) {
+                    b.busy = false;
+                }
+            }
             K::Other => {}
         }
+    }
+
+    /// Shows the overlay (`grab`: a click outside closes it, as for a menu).
+    pub fn overlay_show(&mut self, grab: bool) {
+        if self.overlay.is_some() {
+            return;
+        }
+        let surf = self.new_id(K::Other);
+        wl_compositor::req::create_surface(&mut self.conn, self.compositor, surf);
+        let xdg = self.new_id(K::OverXdg);
+        xdg_wm_base::req::get_xdg_surface(&mut self.conn, self.wm_base, xdg, surf);
+        let pos = self.new_id(K::Other);
+        xdg_wm_base::req::create_positioner(&mut self.conn, self.wm_base, pos);
+        xdg_positioner::req::set_size(&mut self.conn, pos, self.w.max(1), self.h.max(1));
+        xdg_positioner::req::set_anchor_rect(&mut self.conn, pos, 0, 0, self.w.max(1), self.h.max(1));
+        // Top left on top left.
+        xdg_positioner::req::set_anchor(&mut self.conn, pos, 5);
+        xdg_positioner::req::set_gravity(&mut self.conn, pos, 8);
+        let popup = self.new_id(K::OverPopup);
+        xdg_surface::req::get_popup(&mut self.conn, xdg, popup, self.xdg, pos);
+        xdg_positioner::req::destroy(&mut self.conn, pos);
+        if grab {
+            xdg_popup::req::grab(&mut self.conn, popup, self.seat, self.btn_serial);
+        }
+        wl_surface::req::commit(&mut self.conn, surf);
+        self.overlay = Some(Overlay { surf, xdg, popup, bufs: vec![], configured: false });
+        let _ = self.conn.flush();
+    }
+
+    pub fn overlay_shown(&self) -> bool {
+        self.overlay.is_some()
+    }
+
+    pub fn overlay_hide(&mut self) {
+        if let Some(o) = self.overlay.take() {
+            xdg_popup::req::destroy(&mut self.conn, o.popup);
+            xdg_surface::req::destroy(&mut self.conn, o.xdg);
+            wl_surface::req::destroy(&mut self.conn, o.surf);
+            for b in o.bufs {
+                wl_buffer::req::destroy(&mut self.conn, b.buffer);
+            }
+            if self.ptr_surf == o.surf {
+                self.ptr_surf = self.surface;
+            }
+            let _ = self.conn.flush();
+        }
+    }
+
+    /// Draws the overlay; only `input` takes the pointer.
+    pub fn overlay_draw(&mut self, input: &[crate::geom::Rect], f: impl FnOnce(&mut Canvas)) -> bool {
+        let (w, h) = (self.w, self.h);
+        if !self.overlay.as_ref().map_or(false, |o| o.configured) {
+            return false;
+        }
+        // Two buffers: the compositor may still show the other one.
+        if self.overlay.as_ref().map_or(false, |o| o.bufs.is_empty()) {
+            for k in 0..2 {
+                let size = (w * h * 4) as usize;
+                let Ok(fd) = sys::memfd("resc-overlay", size) else { return false };
+                let Ok(map) = sys::Mmap::map(fd.as_fd(), size, true, true) else { return false };
+                let pool = self.new_id(K::Other);
+                wl_shm::req::create_pool(&mut self.conn, self.shm, pool, fd.as_fd(), size as i32);
+                let buffer = self.new_id(K::OverBuf(k));
+                wl_shm_pool::req::create_buffer(&mut self.conn, pool, buffer, 0, w, h, w * 4, crate::shm::FMT_ARGB8888);
+                wl_shm_pool::req::destroy(&mut self.conn, pool);
+                if let Some(o) = self.overlay.as_mut() {
+                    o.bufs.push(Buf { buffer, map, _fd: fd, busy: false });
+                }
+            }
+        }
+        let Some(i) = self.overlay.as_ref().and_then(|o| o.bufs.iter().position(|b| !b.busy)) else { return false };
+        let compositor = self.compositor;
+        let region = self.new_id(K::Other);
+        wl_compositor::req::create_region(&mut self.conn, compositor, region);
+        for r in input {
+            wl_region::req::add(&mut self.conn, region, r.x, r.y, r.w, r.h);
+        }
+        let Some(o) = self.overlay.as_mut() else { return false };
+        let b = &mut o.bufs[i];
+        {
+            let bytes = b.map.as_mut_slice();
+            let px = unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut u32, (w * h) as usize) };
+            let mut cv = Canvas { px, w, h, stride: w as usize };
+            f(&mut cv);
+        }
+        b.busy = true;
+        let (surf, buffer) = (o.surf, b.buffer);
+        wl_surface::req::set_input_region(&mut self.conn, surf, region);
+        wl_region::req::destroy(&mut self.conn, region);
+        wl_surface::req::attach(&mut self.conn, surf, buffer, 0, 0);
+        wl_surface::req::damage_buffer(&mut self.conn, surf, 0, 0, w, h);
+        wl_surface::req::commit(&mut self.conn, surf);
+        let _ = self.conn.flush();
+        true
+    }
+
+    fn drop_offer(&mut self) {
+        if self.offer != 0 {
+            wl_data_offer::req::destroy(&mut self.conn, self.offer);
+            self.offers.remove(&self.offer);
+            self.offer = 0;
+        }
+    }
+
+    fn end_drag(&mut self, done: bool) {
+        if let Some((src, icon, buf)) = self.drag.take() {
+            wl_data_source::req::destroy(&mut self.conn, src);
+            if icon != 0 {
+                wl_surface::req::destroy(&mut self.conn, icon);
+            }
+            if let Some(b) = buf {
+                wl_buffer::req::destroy(&mut self.conn, b.buffer);
+            }
+        }
+        self.events.push(Ev::DragEnd(done));
+        let _ = self.conn.flush();
+    }
+
+    /// Starts a drag of `mimes` (a button is held: the last press's serial). `icon` is the
+    /// picture under the pointer (premultiplied ARGB, w, h) and where the pointer sits in it.
+    pub fn start_drag(&mut self, mimes: &[&str], actions: u32, icon: Option<(&[u32], i32, i32, i32, i32)>) {
+        if self.ddev == 0 || self.drag.is_some() {
+            self.events.push(Ev::DragEnd(false));
+            return;
+        }
+        let src = self.new_id(K::Source);
+        wl_data_device_manager::req::create_data_source(&mut self.conn, self.ddm, src);
+        for m in mimes {
+            wl_data_source::req::offer(&mut self.conn, src, m);
+        }
+        wl_data_source::req::set_actions(&mut self.conn, src, actions);
+        let mut surf = 0;
+        let mut kept = None;
+        if let Some((px, w, h, hx, hy)) = icon {
+            let size = (w * h * 4) as usize;
+            if let (Ok(fd), true) = (sys::memfd("resc-drag", size), w > 0 && h > 0) {
+                if let Ok(mut map) = sys::Mmap::map(fd.as_fd(), size, true, true) {
+                    let dst = unsafe { std::slice::from_raw_parts_mut(map.as_mut_slice().as_mut_ptr() as *mut u32, (w * h) as usize) };
+                    dst.copy_from_slice(&px[..(w * h) as usize]);
+                    let pool = self.new_id(K::Other);
+                    wl_shm::req::create_pool(&mut self.conn, self.shm, pool, fd.as_fd(), size as i32);
+                    let buffer = self.new_id(K::Other);
+                    wl_shm_pool::req::create_buffer(&mut self.conn, pool, buffer, 0, w, h, w * 4, crate::shm::FMT_ARGB8888);
+                    wl_shm_pool::req::destroy(&mut self.conn, pool);
+                    surf = self.new_id(K::Other);
+                    wl_compositor::req::create_surface(&mut self.conn, self.compositor, surf);
+                    wl_surface::req::attach(&mut self.conn, surf, buffer, -hx, -hy);
+                    wl_surface::req::damage_buffer(&mut self.conn, surf, 0, 0, w, h);
+                    kept = Some(Buf { buffer, map, _fd: fd, busy: true });
+                }
+            }
+        }
+        wl_data_device::req::start_drag(&mut self.conn, self.ddev, src, self.surface, surf, self.btn_serial);
+        if surf != 0 {
+            wl_surface::req::commit(&mut self.conn, surf);
+        }
+        self.drag = Some((src, surf, kept));
+        self.drag_action = 0;
+        self.drag_dropped = false;
+        let _ = self.conn.flush();
+    }
+
+    /// Tells the drag over us what we would take here (None: nothing) and how.
+    pub fn dnd_accept(&mut self, mime: Option<&str>, actions: u32, preferred: u32) {
+        if self.offer == 0 {
+            return;
+        }
+        wl_data_offer::req::accept(&mut self.conn, self.offer, self.enter_serial, mime);
+        wl_data_offer::req::set_actions(&mut self.conn, self.offer, actions, if actions & preferred != 0 { preferred } else { 0 });
+        let _ = self.conn.flush();
+    }
+
+    /// Reads the dropped (or hovering) data as `mime`; waits up to a second for the source.
+    pub fn dnd_receive(&mut self, mime: &str) -> Option<Vec<u8>> {
+        if self.offer == 0 {
+            return None;
+        }
+        let (r, w) = sys::pipe().ok()?;
+        wl_data_offer::req::receive(&mut self.conn, self.offer, mime, w.as_fd());
+        self.conn.flush().ok()?;
+        drop(w);
+        let mut out = Vec::new();
+        let deadline = sys::now_ns() + 1_000_000_000;
+        let mut ep = sys::Epoll::new().ok()?;
+        use std::os::fd::AsRawFd;
+        ep.add(r.as_raw_fd(), 1, sys::EPOLLIN).ok()?;
+        let mut f = std::fs::File::from(r);
+        use std::io::Read;
+        let mut buf = [0u8; 16384];
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let left = deadline.saturating_sub(sys::now_ns()) / 1_000_000;
+                    if left == 0 {
+                        break;
+                    }
+                    // The source may be busy answering us on the same connection.
+                    let _ = self.conn.flush();
+                    let mut evs = Vec::new();
+                    let _ = ep.wait(left as i32, &mut evs);
+                }
+                Err(_) => break,
+            }
+        }
+        Some(out)
+    }
+
+    /// Done with a drop: the source hears it (and may remove what was moved).
+    pub fn dnd_finish(&mut self) {
+        if self.offer != 0 {
+            wl_data_offer::req::finish(&mut self.conn, self.offer);
+            self.drop_offer();
+            let _ = self.conn.flush();
+        }
+    }
+
+    /// The action settled for the drag over us (COPY 1, MOVE 2, ASK 4).
+    pub fn dnd_action(&self) -> u32 {
+        self.offer_action
+    }
+
+    /// The action the target picked for our drag (0 none yet).
+    pub fn drag_action(&self) -> u32 {
+        self.drag_action
     }
 
     fn drop_buffers(&mut self) {

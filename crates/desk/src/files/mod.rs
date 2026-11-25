@@ -5,6 +5,8 @@
 //! the copy dialog with its speed graph, name-clash questions, the trash, undo — and
 //! 7-Zip for every archive (open as a folder, extract, add, test, checksums).
 //! Its own Wayland window (client.rs) like «Параметры».
+mod desktop;
+mod dnd;
 mod draw;
 mod input;
 #[cfg(test)]
@@ -237,6 +239,9 @@ pub enum Act {
     DropCopy,
     DropMove,
     DropLink,
+    DropCancel,
+    /// «Параметры» at a page.
+    Settings(&'static str),
     Eject(PathBuf),
     Nav(Loc),
     NavTab(Loc),
@@ -455,11 +460,15 @@ pub enum Hit {
 }
 
 /// What the window itself has to do (the compositor moves / sizes it).
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum WinReq {
     Move,
     Minimize,
     Maximize,
+    /// Hand a drag to the system: types, actions, the picture (px, w, h, hotspot).
+    StartDrag { mimes: Vec<&'static str>, actions: u32, icon: Option<(Vec<u32>, i32, i32, i32, i32)> },
+    /// What we would take from the drag over us.
+    DndAccept { mime: Option<&'static str>, actions: u32, pref: u32 },
 }
 
 pub struct Press {
@@ -557,6 +566,15 @@ pub struct App {
     hash_rx: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
     /// Drag & drop inside the window: the target and the effect.
     pub drag_to: Option<(Loc, Act)>,
+    /// A system drag over the window, and ours gone out of it (dnd.rs).
+    pub incoming: Option<dnd::Incoming>,
+    pub outgoing: Option<dnd::Outgoing>,
+    /// A tab dragged over the strip: where it would go.
+    pub tab_drop_at: Option<usize>,
+    /// Files a drop brought from elsewhere (instead of the selection).
+    pub drop_paths: Option<Vec<PathBuf>>,
+    /// The desktop's icons rather than a window (desktop.rs).
+    pub desk: bool,
     spring_at: Option<(Hit, u64)>,
     pub load_err: Option<String>,
     temp_n: u32,
@@ -749,6 +767,11 @@ impl App {
             props_rx: None,
             hash_rx: None,
             drag_to: None,
+            incoming: None,
+            outgoing: None,
+            tab_drop_at: None,
+            drop_paths: None,
+            desk: false,
             spring_at: None,
             load_err: None,
             temp_n: 0,
@@ -902,6 +925,15 @@ impl App {
 
     /// Goes to `l` in the current tab (adding to its history unless `fresh`).
     pub fn navigate(&mut self, l: Loc) {
+        if self.desk {
+            // From the desktop, places open in a window.
+            if *self.loc() == l {
+                self.reload(true);
+            } else {
+                self.open_window(&l);
+            }
+            return;
+        }
         if *self.loc() == l {
             self.reload(true);
             return;
@@ -1000,6 +1032,9 @@ impl App {
     }
 
     fn view_for(&self, l: &Loc) -> View {
+        if self.desk {
+            return self.views.get(&l.key()).copied().unwrap_or(View { mode: Mode::Icons(48), ..Default::default() });
+        }
         if let Some(v) = self.views.get(&l.key()) {
             return *v;
         }
@@ -1424,6 +1459,9 @@ impl App {
 
     /// The scrolled area (below the column header in details).
     pub fn view_rect(&self) -> Rect {
+        if self.desk {
+            return Rect::new(0, 0, self.w, self.h);
+        }
         let top = TOP + if self.view.mode == Mode::Details { HEAD_H } else { 0 };
         Rect::from_edges(NAV_W + 1, top, self.w, self.h - STATUS_H)
     }
@@ -1439,6 +1477,10 @@ impl App {
     }
 
     pub fn lay(&mut self) {
+        if self.desk {
+            self.lay_desktop();
+            return;
+        }
         let vr = self.view_rect();
         let cw = vr.w - 14;
         let mut rects = Vec::with_capacity(self.items.len());
@@ -2291,6 +2333,10 @@ impl App {
     // -------------------------------------------------------------- tabs
 
     pub fn new_tab(&mut self, l: Loc) {
+        if self.desk {
+            self.open_window(&l);
+            return;
+        }
         self.save_tab();
         self.tabs.insert(self.cur + 1, Tab { loc: l.clone(), back: vec![], fwd: vec![], sel: vec![], scroll: 0.0 });
         self.cur += 1;
@@ -2320,6 +2366,9 @@ impl App {
     }
 
     pub fn close_tab(&mut self, i: usize) {
+        if self.desk {
+            return;
+        }
         if self.tabs.len() == 1 {
             self.quit = true;
             return;
@@ -2446,8 +2495,9 @@ impl App {
             }
         }
         // Spring-loaded folders: hold a drag over a folder and it opens.
-        if let (Some((hit, at)), Some(p)) = (self.spring_at, &self.press) {
-            if p.dragging && sys::now_ns() - at > 1_100_000_000 {
+        let dragging = self.press.as_ref().map_or(false, |p| p.dragging) || self.incoming.is_some();
+        if let Some((hit, at)) = self.spring_at {
+            if dragging && !self.desk && sys::now_ns() - at > 1_100_000_000 {
                 self.spring_at = None;
                 if let Hit::Item(i) = hit {
                     if self.items.get(i).map_or(false, |it| it.e.dir && !self.sel[i]) {
@@ -2755,8 +2805,19 @@ fn parse_loc(a: &str) -> Loc {
 
 pub fn run(args: &[String]) -> i32 {
     crate::font::init();
-    let start = args.iter().find(|a| !a.starts_with('-')).map(|a| parse_loc(a)).unwrap_or_else(|| Loc::Dir(model::home()));
-    let mut win = match Window::open("Проводник", "resc.files", 1180, 720, (640, 420)) {
+    // --tab FILE: a tab torn off another window (its place and history).
+    let torn = args.iter().position(|a| a == "--tab").and_then(|i| args.get(i + 1)).and_then(|f| {
+        let t = std::fs::read_to_string(f).ok();
+        let _ = std::fs::remove_file(f);
+        t.and_then(|t| dnd::tab_parse(&t))
+    });
+    let tab_file = args.iter().position(|a| a == "--tab").and_then(|i| args.get(i + 1)).cloned();
+    let start = args.iter().find(|a| !a.starts_with('-') && Some(*a) != tab_file.as_ref()).map(|a| parse_loc(a)).unwrap_or_else(|| Loc::Dir(model::home()));
+    let start = torn.as_ref().map(|t| t.loc.clone()).unwrap_or(start);
+    let desk = args.iter().any(|a| a == "--desktop");
+    let start = if desk { Loc::Dir(desktop::desktop_dir()) } else { start };
+    let (title0, app_id) = if desk { ("Рабочий стол", "resc.desktop") } else { ("Проводник", "resc.files") };
+    let mut win = match Window::open(title0, app_id, 1180, 720, if desk { (1, 1) } else { (640, 420) }) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("files: {e}");
@@ -2764,6 +2825,15 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
     let mut app = App::new(start, win.w, win.h);
+    if desk {
+        app.desk = true;
+        app.view = app.view_for(&app.loc().clone());
+        app.lay();
+    }
+    if let Some(t) = torn {
+        app.tabs[0].back = t.back;
+        app.tabs[0].fwd = t.fwd;
+    }
     if app.watch.fd >= 0 {
         win.watch_fd(app.watch.fd, true);
     }
@@ -2772,7 +2842,7 @@ pub fn run(args: &[String]) -> i32 {
     loop {
         let wait = if app.animating() {
             16
-        } else if app.ops_busy() || app.searching || app.rename_at.is_some() || app.search_at.is_some() || app.reload_at.is_some() || app.props_rx.is_some() || app.hash_rx.is_some() || app.toast.is_some() || app.press.as_ref().map_or(false, |p| p.dragging) {
+        } else if app.ops_busy() || app.searching || app.rename_at.is_some() || app.search_at.is_some() || app.reload_at.is_some() || app.props_rx.is_some() || app.hash_rx.is_some() || app.toast.is_some() || app.press.as_ref().map_or(false, |p| p.dragging) || app.incoming.is_some() {
             100
         } else {
             -1
@@ -2796,7 +2866,7 @@ pub fn run(args: &[String]) -> i32 {
                         app.fdrop.snap(app.rects[f]);
                     }
                 }
-                Ev::Close => app.quit = true,
+                Ev::Close => app.quit = !app.desk,
                 Ev::Motion(x, y) => app.motion(x, y),
                 Ev::Leave => app.leave(),
                 Ev::Button(b, down) => app.button(b, down),
@@ -2807,6 +2877,28 @@ pub fn run(args: &[String]) -> i32 {
                         app.key(k);
                     }
                 }
+                Ev::DndEnter { x, y, mimes, actions: _ } => {
+                    let mut read = |m: &str| win.dnd_receive(m);
+                    app.dnd_enter(x, y, &mimes, &mut read);
+                }
+                Ev::DndMotion(x, y) => app.dnd_motion(x, y),
+                Ev::DndLeave => app.dnd_leave(),
+                Ev::DndDrop => {
+                    let a = win.dnd_action();
+                    app.dnd_drop(a);
+                    win.dnd_finish();
+                }
+                Ev::DragSend(mime, fd) => {
+                    use std::io::Write;
+                    let data = app.drag_data(&mime);
+                    let mut f = std::fs::File::from(fd);
+                    let _ = f.write_all(&data);
+                }
+                Ev::DragAction(_) => {}
+                Ev::DragEnd(done) => app.drag_end(done),
+                Ev::OverlayDone => {
+                    app.menu = None;
+                }
             }
         }
         app.maximized = win.maximized;
@@ -2815,13 +2907,24 @@ pub fn run(args: &[String]) -> i32 {
                 WinReq::Move => win.begin_move(),
                 WinReq::Minimize => win.minimize(),
                 WinReq::Maximize => win.toggle_maximize(),
+                WinReq::StartDrag { mimes, actions, icon } => {
+                    let icon = icon.as_ref().map(|(px, w, h, hx, hy)| (px.as_slice(), *w, *h, *hx, *hy));
+                    win.start_drag(&mimes, actions, icon);
+                }
+                WinReq::DndAccept { mime, actions, pref } => win.dnd_accept(mime, actions, pref),
             }
         }
         if app.quit {
             return 0;
         }
         app.tick();
-        let t = if app.title.is_empty() { "Проводник".to_string() } else { format!("{} — Проводник", app.title) };
+        let t = if app.desk {
+            "Рабочий стол".to_string()
+        } else if app.title.is_empty() {
+            "Проводник".to_string()
+        } else {
+            format!("{} — Проводник", app.title)
+        };
         if t != title {
             win.set_title(&t);
             title = t;
@@ -2832,9 +2935,39 @@ pub fn run(args: &[String]) -> i32 {
         if app.step(dt) {
             app.dirty = true;
         }
-        if app.dirty && win.ready() {
-            win.draw(|cv| draw::draw(&app, cv));
-            app.dirty = false;
+        // The desktop's menus and dialogs: over every window, in a popup of their own.
+        if app.desk {
+            let need = app.menu.is_some() || app.dialog.is_some();
+            if need && !win.overlay_shown() {
+                win.overlay_show(app.menu.is_some());
+                app.dirty = true;
+            } else if !need && win.overlay_shown() {
+                win.overlay_hide();
+            }
+        }
+        if app.dirty {
+            let mut done = true;
+            if win.ready() {
+                win.draw(|cv| draw::draw(&app, cv));
+            } else {
+                done = false;
+            }
+            if app.desk && win.overlay_shown() {
+                let mut input = Vec::new();
+                if let Some(m) = &app.menu {
+                    input.push(m.rect());
+                    if let Some((_, s)) = &m.sub {
+                        input.push(s.rect());
+                    }
+                }
+                if let Some(d) = &app.dialog {
+                    input.push(draw::dialog_rect(d, app.w, app.h));
+                }
+                done &= win.overlay_draw(&input, |cv| draw::overlay(&app, cv));
+            }
+            if done {
+                app.dirty = false;
+            }
         }
     }
 }
@@ -2949,7 +3082,7 @@ impl App {
         }
         let in_arc = matches!(self.loc(), Loc::Arc(..));
         v.push(MItem::new("Открыть", Act::Open).hint("Enter").bold());
-        if it.e.dir && !in_arc {
+        if it.e.dir && !in_arc && !self.desk {
             v.push(MItem::new("Открыть в новой вкладке", Act::OpenTab));
             v.push(MItem::new("Открыть в терминале", Act::Terminal));
         }
@@ -2985,6 +3118,9 @@ impl App {
 
     /// Right click on empty space.
     pub fn bg_menu(&self) -> Vec<MItem> {
+        if self.desk {
+            return self.desk_menu();
+        }
         let mut v = Vec::new();
         if matches!(self.loc(), Loc::Trash) {
             v.push(MItem::new("Очистить корзину", Act::EmptyTrash).on(!self.items.is_empty()));
@@ -3223,9 +3359,18 @@ impl App {
                 let l = self.tabs[i].loc.clone();
                 self.new_tab(l);
             }
+            Act::Settings(page) => {
+                let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "resc-desk".into());
+                open::spawn(&format!("{} settings {page}", open::quote(&exe)), None);
+            }
+            Act::DropCancel => {
+                self.drop_paths = None;
+                self.drag_to = None;
+            }
             Act::DropCopy | Act::DropMove | Act::DropLink => {
+                let from = self.drop_paths.take();
                 if let Some((Loc::Dir(dest), _)) = self.drag_to.take() {
-                    let items = self.sel_paths();
+                    let items = from.unwrap_or_else(|| self.sel_paths());
                     match a {
                         Act::DropLink => {
                             for p in items {

@@ -267,6 +267,10 @@ pub fn toplevel_commit(d: &mut Desk, wk: WKey, old_frame: Option<Rect>) {
             let mode = if d.windows[wk].ssd { 2 } else { 1 };
             zxdg_toplevel_decoration_v1::evt::configure(&mut d.clients[ck].conn, deco, mode);
         }
+        if d.windows[wk].desktop() {
+            d.windows[wk].ssd = false;
+            d.windows[wk].tile = Tile::Maximized;
+        }
         match d.windows[wk].tile {
             Tile::Maximized => {
                 d.windows[wk].tile = Tile::Floating;
@@ -332,6 +336,19 @@ fn serial_reached(acked: u32, want: u32) -> bool {
 }
 
 fn map_window(d: &mut Desk, wk: WKey) {
+    if d.windows[wk].desktop() {
+        d.windows[wk].placed = true;
+        d.stack.retain(|k| *k != wk);
+        d.stack.insert(0, wk);
+        d.windows[wk].minimized = false;
+        // Focus stays where it is unless nothing else is open.
+        if focused(d).is_none() {
+            focus_window(d, Some(wk));
+        }
+        damage_window(d, wk);
+        update_window_outputs(d, wk);
+        return;
+    }
     if !d.windows[wk].placed {
         place_window(d, wk);
     }
@@ -362,13 +379,17 @@ fn place_window(d: &mut Desk, wk: WKey) {
     let fh = g.h + t + 2 * b;
     let oi = d.output_at(d.seat.x, d.seat.y).unwrap_or(0);
     let wa = workarea(d, oi);
+    let now = d.now_ms();
+    let hint = d.place_next.take().filter(|h| h.0 == d.windows[wk].app_id && now < h.3);
     let (mut fx, mut fy) = if let Some(p) = d.windows[wk].parent.and_then(|p| frame_rect(d, p)) {
         (p.x + (p.w - fw) / 2, p.y + (p.h - fh) / 2)
+    } else if let Some((_, ox, oy, _)) = &hint {
+        (d.seat.x as i32 - ox - b, d.seat.y as i32 - oy - t - b)
     } else {
         (wa.x + (wa.w - fw) / 2, wa.y + (wa.h - fh) / 2)
     };
     // Cascade away from windows already sitting at the same spot.
-    for _ in 0..10 {
+    for _ in 0..if hint.is_some() { 0 } else { 10 } {
         let taken = d.stack.iter().any(|k| {
             frame_rect(d, *k).map_or(false, |r| (r.x - fx).abs() < 8 && (r.y - fy).abs() < 8)
         });
@@ -442,7 +463,7 @@ pub fn visible_stack(d: &Desk) -> Vec<WKey> {
         .copied()
         .filter(|k| {
             let w = &d.windows[*k];
-            w.workspace == d.workspace && !w.minimized && d.surfaces.get(w.surf).map_or(false, |s| s.mapped)
+            (w.workspace == d.workspace || w.desktop()) && !w.minimized && d.surfaces.get(w.surf).map_or(false, |s| s.mapped)
         })
         .collect()
 }
@@ -450,12 +471,18 @@ pub fn visible_stack(d: &Desk) -> Vec<WKey> {
 pub fn focus_top(d: &mut Desk) {
     let top = d.mru.iter().copied().find(|k| {
         let w = &d.windows[*k];
-        w.workspace == d.workspace && !w.minimized && d.surfaces.get(w.surf).map_or(false, |s| s.mapped)
+        (w.workspace == d.workspace || w.desktop()) && !w.minimized && d.surfaces.get(w.surf).map_or(false, |s| s.mapped)
     });
     focus_window(d, top);
 }
 
 pub fn raise(d: &mut Desk, wk: WKey) {
+    if d.windows[wk].desktop() {
+        // Always at the bottom.
+        d.stack.retain(|k| *k != wk);
+        d.stack.insert(0, wk);
+        return;
+    }
     d.stack.retain(|k| *k != wk);
     d.stack.push(wk);
     // Transient children stay above their parent.
@@ -540,6 +567,9 @@ pub fn maximize(d: &mut Desk, wk: WKey) {
 }
 
 pub fn snap(d: &mut Desk, wk: WKey, s: Snap, oi: usize) {
+    if d.windows.get(wk).map_or(true, |w| w.desktop()) {
+        return;
+    }
     save_restore(d, wk);
     let wa = workarea(d, oi);
     let (hw, hh) = (wa.w / 2, wa.h / 2);
@@ -558,6 +588,9 @@ pub fn snap(d: &mut Desk, wk: WKey, s: Snap, oi: usize) {
 }
 
 pub fn restore(d: &mut Desk, wk: WKey) {
+    if d.windows.get(wk).map_or(true, |w| w.desktop()) {
+        return;
+    }
     let r = d.windows[wk].restore;
     d.windows[wk].tile = Tile::Floating;
     if r.is_empty() {
@@ -568,6 +601,9 @@ pub fn restore(d: &mut Desk, wk: WKey) {
 }
 
 pub fn fullscreen(d: &mut Desk, wk: WKey, on: bool, oi: Option<usize>) {
+    if d.windows.get(wk).map_or(true, |w| w.desktop()) {
+        return;
+    }
     if !d.surfaces[d.windows[wk].surf].xdg_initial_sent {
         if on {
             d.windows[wk].tile = Tile::Fullscreen;
@@ -589,6 +625,9 @@ pub fn fullscreen(d: &mut Desk, wk: WKey, on: bool, oi: Option<usize>) {
 }
 
 pub fn minimize(d: &mut Desk, wk: WKey) {
+    if d.windows.get(wk).map_or(true, |w| w.desktop()) {
+        return;
+    }
     damage_window(d, wk);
     d.windows[wk].minimized = true;
     crate::winanim::close(d, wk);
@@ -626,6 +665,9 @@ pub fn taskbar_activate(d: &mut Desk, wk: WKey) {
 }
 
 pub fn toggle_maximize(d: &mut Desk, wk: WKey) {
+    if d.windows.get(wk).map_or(true, |w| w.desktop()) {
+        return;
+    }
     if d.windows[wk].tile == Tile::Maximized {
         restore(d, wk);
     } else {
@@ -649,7 +691,7 @@ pub fn show_desktop(d: &mut Desk) {
         }
         return;
     }
-    let vis: Vec<WKey> = d.mru.iter().copied().filter(|k| visible_stack(d).contains(k)).collect();
+    let vis: Vec<WKey> = d.mru.iter().copied().filter(|k| visible_stack(d).contains(k) && !d.windows[*k].desktop()).collect();
     for wk in &vis {
         damage_window(d, *wk);
         d.windows[*wk].minimized = true;
@@ -661,6 +703,9 @@ pub fn show_desktop(d: &mut Desk) {
 
 /// Win+Left / Win+Right with Windows semantics (cycles snap → other monitor).
 pub fn snap_key(d: &mut Desk, wk: WKey, right: bool) {
+    if d.windows.get(wk).map_or(true, |w| w.desktop()) {
+        return;
+    }
     let oi = window_output(d, wk);
     let tile = d.windows[wk].tile;
     let next_out = |d: &Desk, right: bool| -> Option<usize> { neighbour_output(d, oi, right) };
@@ -690,6 +735,9 @@ pub fn snap_key(d: &mut Desk, wk: WKey, right: bool) {
 
 /// Win+Up / Win+Down.
 pub fn vertical_key(d: &mut Desk, wk: WKey, up: bool) {
+    if d.windows.get(wk).map_or(true, |w| w.desktop()) {
+        return;
+    }
     let oi = window_output(d, wk);
     match (d.windows[wk].tile, up) {
         (Tile::Floating, true) => maximize(d, wk),
@@ -723,6 +771,9 @@ pub fn neighbour_output(d: &Desk, oi: usize, right: bool) -> Option<usize> {
 
 /// Win+Shift+Left/Right: move to the neighbouring monitor keeping relative placement.
 pub fn move_to_output(d: &mut Desk, wk: WKey, right: bool) {
+    if d.windows.get(wk).map_or(true, |w| w.desktop()) {
+        return;
+    }
     let from = window_output(d, wk);
     let to = neighbour_output(d, from, right).or_else(|| {
         // Wrap around like Windows does.
@@ -793,6 +844,9 @@ pub fn close_workspace(d: &mut Desk) {
 }
 
 pub fn move_to_workspace(d: &mut Desk, wk: WKey, ws: u32) {
+    if d.windows.get(wk).map_or(true, |w| w.desktop()) {
+        return;
+    }
     if ws >= d.workspaces {
         return;
     }
@@ -938,6 +992,12 @@ pub enum Hit {
 
 /// Topmost window element under (x, y) in global coords.
 pub fn hit_test(d: &Desk, x: f64, y: f64) -> Option<(WKey, Hit)> {
+    // The desktop's menus are over every window.
+    for wk in visible_stack(d).into_iter().filter(|k| d.windows[*k].desktop()) {
+        if let Some(h) = hit_surface_tree(d, d.windows[wk].surf, x, y, true) {
+            return Some((wk, h));
+        }
+    }
     for wk in visible_stack(d).into_iter().rev() {
         let w = &d.windows[wk];
         // Popups first (they sit above their window).
@@ -992,4 +1052,33 @@ fn hit_surface_tree(d: &Desk, sk: SKey, x: f64, y: f64, popups_only: bool) -> Op
         }
     }
     None
+}
+
+/// Moves the active window so its content point (x, y) sits under the pointer (a single tab
+/// of «Проводник» dragged and let go away from any tab strip).
+pub fn move_active_to_pointer(d: &mut Desk, x: i32, y: i32) {
+    let Some(&wk) = d.mru.first() else { return };
+    let Some(w) = d.windows.get(wk) else { return };
+    if w.tile != Tile::Floating || w.minimized || w.desktop() {
+        return;
+    }
+    let old = frame_rect(d, wk);
+    let oi = d.output_at(d.seat.x, d.seat.y).unwrap_or(0);
+    let wa = workarea(d, oi);
+    let g = d.surfaces[w.surf].geom();
+    let nx = (d.seat.x as i32 - x).clamp(wa.x - g.w + 80, wa.x1() - 80);
+    let ny = (d.seat.y as i32 - y).clamp(wa.y, wa.y1() - 40);
+    let w = &mut d.windows[wk];
+    w.x = nx;
+    w.y = ny;
+    w.restore = Rect::new(nx, ny, g.w, g.h);
+    if let Some(r) = old {
+        d.damage(r.inflate(crate::shell::SHADOW));
+    }
+    if let Some(r) = visual_rect(d, wk) {
+        d.damage(r);
+    }
+    let sk = d.windows[wk].surf;
+    d.damage_surface_tree(sk);
+    update_window_outputs(d, wk);
 }

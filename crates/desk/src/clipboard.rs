@@ -168,7 +168,7 @@ fn make_selection(d: &mut Desk, i: usize) {
     let data = e.text.clone();
     d.clip.items.insert(0, e);
     let mimes = TEXT_MIMES.iter().map(|s| s.to_string()).collect();
-    let dk = d.sources.insert(DataSource { client: Default::default(), obj: 0, mimes, primary: false, own: Some(data), x11: false });
+    let dk = d.sources.insert(DataSource { client: Default::default(), obj: 0, mimes, primary: false, own: Some(data), x11: false, actions: 0 });
     crate::server::set_selection(d, Some(dk));
     d.clip.last_dk = Some(dk);
 }
