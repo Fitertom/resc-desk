@@ -109,6 +109,10 @@ enum Tag {
     MimeAtom(String),
     TargetsReady(usize, u32),
     Own(usize, u32),
+    // RandR: the main monitor for X programs.
+    Randr,
+    RandrRes,
+    RandrOut(u32),
 }
 
 /// An X window at the top level (a child of the root).
@@ -190,6 +194,10 @@ pub struct Xwm {
     focus: Xid,
     client_list: Vec<Xid>,
     sel: sel::Sels,
+    /// RandR's major opcode (0: not there or not asked yet).
+    randr: u8,
+    /// The main monitor X has been told, with the monitor count then: told again on change.
+    randr_told: Option<(String, usize)>,
     debug: bool,
 }
 
@@ -230,6 +238,8 @@ pub fn init(d: &mut Desk) {
             focus: 0,
             client_list: vec![],
             sel: Default::default(),
+            randr: 0,
+            randr_told: None,
             debug: std::env::var("RESC_XWM_DEBUG").map_or(false, |v| !v.is_empty()),
         };
         x.listen(d);
@@ -393,6 +403,8 @@ impl Xwm {
         self.setup_done = false;
         self.composite_done = false;
         self.ready = false;
+        self.randr = 0;
+        self.randr_told = None;
         self.want_out = false;
         self.focus = 0;
         self.client_list.clear();
@@ -443,8 +455,25 @@ impl Xwm {
         c.set_selection_owner(check, a.net_wm_cm_s0);
         // Windows made before we were listening (the program that started Xwayland).
         c.query_tree(root, Tag::Tree);
+        c.query_extension("RANDR", Tag::Randr);
         sel::start(self);
         self.ready = true;
+    }
+
+    /// X's main monitor follows ours (RandR SetOutputPrimary): without one, X programs take
+    /// the first monitor in the list, which is not the main one.
+    fn tell_primary(&mut self, d: &Desk) {
+        if self.randr == 0 || d.outputs.is_empty() {
+            return;
+        }
+        let main = d.outputs[crate::monitors::primary_index(d).min(d.outputs.len() - 1)].name.clone();
+        let want = (main, d.outputs.len());
+        if self.randr_told.as_ref() == Some(&want) {
+            return;
+        }
+        self.randr_told = Some(want);
+        let (major, root) = (self.randr, self.root);
+        self.conn().ext_reply(major, 25, &root.to_le_bytes(), Tag::RandrRes);
     }
 
     fn maybe_ready(&mut self) {
@@ -517,6 +546,42 @@ impl Xwm {
                 self.maybe_ready();
             }
             Msg::Reply(Tag::Ignore, _) => {}
+            Msg::Reply(Tag::Randr, r) => {
+                if r[8] != 0 {
+                    self.randr = r[9];
+                    // QueryVersion 1.6 before the newer requests.
+                    self.conn().ext_reply(r[9], 0, &[1, 0, 0, 0, 6, 0, 0, 0], Tag::Ignore);
+                }
+            }
+            Msg::Reply(Tag::RandrRes, r) => {
+                // GetScreenResourcesCurrent: crtcs, then outputs; ask each output its name.
+                let (nc, no) = (u16_at(&r, 16) as usize, u16_at(&r, 18) as usize);
+                let ts = u32_at(&r, 12);
+                let major = self.randr;
+                for i in 0..no {
+                    let at = 32 + (nc + i) * 4;
+                    if at + 4 > r.len() {
+                        break;
+                    }
+                    let out = u32_at(&r, at);
+                    let mut b = out.to_le_bytes().to_vec();
+                    b.extend_from_slice(&ts.to_le_bytes());
+                    self.conn().ext_reply(major, 9, &b, Tag::RandrOut(out));
+                }
+            }
+            Msg::Reply(Tag::RandrOut(out), r) => {
+                // GetOutputInfo: the name after the crtcs, modes and clones lists.
+                let (nc, nm, ncl, nl) = (u16_at(&r, 26) as usize, u16_at(&r, 28) as usize, u16_at(&r, 32) as usize, u16_at(&r, 34) as usize);
+                let at = 36 + (nc + nm + ncl) * 4;
+                let name = r.get(at..at + nl).map(|n| String::from_utf8_lossy(n).to_string());
+                if name.is_some() && name.as_deref() == self.randr_told.as_ref().map(|t| t.0.as_str()) {
+                    let mut b = self.root.to_le_bytes().to_vec();
+                    b.extend_from_slice(&out.to_le_bytes());
+                    let major = self.randr;
+                    // SetOutputPrimary: X programs (Steam and the like) open there.
+                    self.conn().ext(major, 30, &b);
+                }
+            }
             Msg::Reply(Tag::Tree, r) => {
                 let n = u16_at(&r, 16) as usize;
                 let kids: Vec<Xid> = (0..n).map(|i| u32_at(&r, 32 + i * 4)).filter(|w| *w != self.check).collect();
@@ -1203,6 +1268,7 @@ pub fn dispatch(d: &mut Desk, tok: u64, ev: u32) {
 pub fn sync(d: &mut Desk) {
     let Some(mut x) = d.xwm.take() else { return };
     if x.ready && x.conn.is_some() {
+        x.tell_primary(d);
         x.sync_windows(d);
         sel::tick(&mut x, d);
     } else {
