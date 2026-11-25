@@ -642,11 +642,13 @@ pub fn draw_taskbar(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
                 }
                 let (hh, mm, day, mon, year) = crate::clock::local_now();
                 let t = format!("{hh:02}:{mm:02}");
-                let dt = format!("{day:02}.{mon:02}.{year}");
+                // The timer counting down or what went off, else the date.
+                let (dt, dc) = crate::cal::clock_line(d).unwrap_or_else(|| (format!("{day:02}.{mon:02}.{year}"), col::TEXT_DIM));
+                let dt = ellipsize(&dt, 11.5, font::W::Text, r.w - 14);
                 let tw = font::text_width_w(&t, 13.0, font::W::Bold);
                 let dw = font::text_width(&dt, 11.5);
                 font::draw_text_w(cv, clip, xf, r.x1() - tw - 10, r.y + 19, &t, 13.0, col::TEXT, r.w, font::W::Bold);
-                font::draw_text(cv, clip, xf, r.x1() - dw - 10, r.y + 35, &dt, 11.5, col::TEXT_DIM, r.w);
+                font::draw_text(cv, clip, xf, r.x1() - dw - 10, r.y + 35, &dt, 11.5, dc, r.w);
             }
         }
     }
@@ -1360,8 +1362,7 @@ pub fn menu_key(d: &mut Desk, code: u32, pressed: bool) -> bool {
     if crate::clipboard::key(d, code, pressed) {
         return true;
     }
-    if crate::tray::wants_keys(d) {
-        crate::tray::key(d, code, pressed);
+    if crate::tray::wants_keys(d) && crate::tray::key(d, code, pressed) {
         return true;
     }
     if code == crate::input::key::ESC && (d.overlay.taskview.is_some() || d.tray.fly.is_some()) && d.overlay.start_menu.is_none() {
@@ -1632,7 +1633,7 @@ pub fn overlay_click(d: &mut Desk, x: f64, y: f64, button: u32) -> bool {
     if peek_click(d, x, y, button) {
         return true;
     }
-    if crate::tray::click(d, x, y) {
+    if crate::tray::click(d, x, y, button) {
         return true;
     }
     if crate::clipboard::click(d, x, y) {

@@ -4,7 +4,7 @@
 //!   one, disconnect), the cable; NetworkManager over our D-Bus client (net.rs), polled;
 //! - sound: the output's volume (a slider; the speaker mutes), the outputs to choose from,
 //!   the same for the microphone, and a way to the sound settings;
-//! - calendar: today's date and a month, paged with the arrows.
+//! - calendar: today's date, a month with marks and notes, a timer and an alarm (cal.rs).
 //!
 //! Sound goes through our PulseAudio client (pulse.rs): one connection, subscribed to
 //! changes, whose socket sits in the main loop (TOK_PULSE).
@@ -37,9 +37,8 @@ enum Hot {
     Slider(bool),
     Device(bool, u32),
     Settings,
-    Prev,
-    Next,
-    Today,
+    /// On the calendar flyout (cal.rs).
+    Cal(crate::cal::CHot),
     WifiToggle,
     /// A network row (its index in the list shown).
     Ap(u16),
@@ -52,8 +51,8 @@ enum Hot {
 #[derive(Default)]
 pub struct Tray {
     pub fly: Option<(usize, Fly)>,
-    /// Calendar: months away from this one.
-    month: i32,
+    /// The calendar flyout's state: marks, notes, the timer and the alarm.
+    pub cal: crate::cal::Cal,
     /// A volume slider held (input?), and its value while held.
     drag: Option<bool>,
     hot: Option<Hot>,
@@ -77,6 +76,7 @@ pub struct Tray {
 
 pub fn init(d: &mut Desk) {
     connect(d);
+    crate::cal::init(d);
 }
 
 fn connect(d: &mut Desk) {
@@ -126,6 +126,7 @@ pub fn housekeeping(d: &mut Desk) {
         connect(d);
     }
     net_poll(d, false);
+    crate::cal::tick(d);
 }
 
 // ------------------------------------------------------------------ network
@@ -223,12 +224,16 @@ fn net_connect(d: &mut Desk, ssid: &str, password: Option<String>) {
 
 /// The password field has the keyboard.
 pub fn wants_keys(d: &Desk) -> bool {
-    is_open(d, Fly::Net) && d.tray.pw_for.is_some()
+    (is_open(d, Fly::Net) && d.tray.pw_for.is_some()) || is_open(d, Fly::Calendar)
 }
 
-pub fn key(d: &mut Desk, code: u32, pressed: bool) {
+/// A key while a flyout wants them. True if used.
+pub fn key(d: &mut Desk, code: u32, pressed: bool) -> bool {
+    if is_open(d, Fly::Calendar) {
+        return crate::cal::key(d, code, pressed);
+    }
     if !pressed {
-        return;
+        return true;
     }
     use crate::input::key;
     match code {
@@ -253,6 +258,7 @@ pub fn key(d: &mut Desk, code: u32, pressed: bool) {
         }
     }
     damage_fly(d);
+    true
 }
 
 fn open_net_settings(d: &mut Desk) {
@@ -496,8 +502,10 @@ pub fn toggle(d: &mut Desk, oi: usize, f: Fly) {
         return;
     }
     d.tray.fly = Some((oi, f));
-    d.tray.month = 0;
     d.tray.hot = None;
+    if f == Fly::Calendar {
+        crate::cal::opened(d);
+    }
     if f == Fly::Sound {
         refresh(d);
     }
@@ -521,6 +529,7 @@ pub fn close(d: &mut Desk) {
         d.tray.fly = None;
         d.tray.drag = None;
         d.tray.pw_for = None;
+        crate::cal::closed(d);
         shell::damage_taskbars(d);
     }
 }
@@ -588,7 +597,7 @@ fn lay(d: &Desk) -> Option<Lay> {
     let (w, h) = match f {
         Fly::Net => (360, net_height(d, &net_rows)),
         Fly::Sound => (360, sound_height(&d.tray.audio)),
-        Fly::Calendar => (7 * 44 + 2 * PAD, PAD + 26 + 16 + 34 + 26 + 6 * 40 + PAD),
+        Fly::Calendar => (crate::cal::W, crate::cal::H),
     };
     let x = (island.x1() - w).clamp(o.x + 8, (o.x1() - 8 - w).max(o.x + 8));
     let panel = Rect::new(x, island.y - FLY_GAP - h, w, h);
@@ -636,10 +645,7 @@ fn lay(d: &Desk) -> Option<Lay> {
             hits.push((Hot::Settings, Rect::new(panel.x + 8, y, panel.w - 16, 40)));
         }
         Fly::Calendar => {
-            let y = panel.y + PAD + 26 + 16;
-            hits.push((Hot::Today, Rect::new(panel.x + 8, panel.y + 6, panel.w - 110, 40)));
-            hits.push((Hot::Prev, Rect::new(panel.x1() - PAD - 68, y + 2, 30, 30)));
-            hits.push((Hot::Next, Rect::new(panel.x1() - PAD - 32, y + 2, 30, 30)));
+            hits.extend(crate::cal::hits(d, panel).into_iter().map(|(h, r)| (Hot::Cal(h), r)));
         }
     }
     Some(Lay { panel, hits })
@@ -662,7 +668,7 @@ fn slider_value(d: &Desk, input: bool, x: f64) -> Option<u32> {
 }
 
 /// A press. True if it was ours (on the flyout, or closing it).
-pub fn click(d: &mut Desk, x: f64, y: f64) -> bool {
+pub fn click(d: &mut Desk, x: f64, y: f64, button: u32) -> bool {
     let Some(l) = lay(d) else { return false };
     if !l.panel.contains(x, y) {
         // Outside: away it goes. On its own island button the click ends here (else that
@@ -673,6 +679,13 @@ pub fn click(d: &mut Desk, x: f64, y: f64) -> bool {
         return own.is_some() && own == f;
     }
     let Some(hot) = l.hits.iter().find(|(_, r)| r.contains(x, y)).map(|(h, _)| *h) else { return true };
+    if let Hot::Cal(h) = hot {
+        crate::cal::click(d, h, button);
+        return true;
+    }
+    if button != crate::input::BTN_LEFT {
+        return true;
+    }
     match hot {
         Hot::Mute(input) => toggle_mute(d, input),
         Hot::Slider(input) => {
@@ -686,14 +699,7 @@ pub fn click(d: &mut Desk, x: f64, y: f64) -> bool {
             close(d);
             open_sound_settings(d);
         }
-        Hot::Prev | Hot::Next => {
-            d.tray.month += if hot == Hot::Next { 1 } else { -1 };
-            damage_fly(d);
-        }
-        Hot::Today => {
-            d.tray.month = 0;
-            damage_fly(d);
-        }
+        Hot::Cal(_) => {}
         Hot::WifiToggle => {
             let on = !d.tray.net.wifi_enabled;
             net_op(d, |bus, _| net::set_wifi(bus, on));
@@ -750,6 +756,11 @@ pub fn release(d: &mut Desk) {
 }
 
 pub fn hover(d: &mut Desk, x: f64, y: f64) {
+    // The calendar goes away when the pointer leaves it, as Glint Calendar does.
+    if is_open(d, Fly::Calendar) && crate::cal::hover(d, contains(d, x, y)) {
+        close(d);
+        return;
+    }
     let hot = lay(d).and_then(|l| l.hits.into_iter().find(|(_, r)| r.contains(x, y)).map(|(h, _)| h));
     if hot != d.tray.hot {
         d.tray.hot = hot;
@@ -761,6 +772,14 @@ pub fn hover(d: &mut Desk, x: f64, y: f64) {
 pub fn scroll(d: &mut Desk, x: f64, y: f64, value: f64) -> bool {
     if value == 0.0 {
         return false;
+    }
+    if is_open(d, Fly::Calendar) && contains(d, x, y) {
+        let h = lay(d).and_then(|l| l.hits.into_iter().find(|(_, r)| r.contains(x, y))).and_then(|(h, _)| match h {
+            Hot::Cal(c) => Some(c),
+            _ => None,
+        });
+        crate::cal::scroll(d, h, value);
+        return true;
     }
     let delta = if value > 0.0 { -STEP } else { STEP };
     let on_slider = lay(d).and_then(|l| l.hits.into_iter().find(|(h, r)| matches!(h, Hot::Slider(_) | Hot::Mute(_)) && r.contains(x, y)));
@@ -799,7 +818,13 @@ pub fn draw(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
     match f {
         Fly::Net => draw_net(d, &l, xf, cv, clip),
         Fly::Sound => draw_sound(d, &l, xf, cv, clip),
-        Fly::Calendar => draw_calendar(d, &l, xf, cv, clip),
+        Fly::Calendar => {
+            let hot = match d.tray.hot {
+                Some(Hot::Cal(h)) => Some(h),
+                _ => None,
+            };
+            crate::cal::draw(d, l.panel, hot, xf, cv, clip)
+        }
     }
 }
 
@@ -975,11 +1000,6 @@ fn draw_net(d: &Desk, l: &Lay, xf: Xf, cv: &mut Canvas, clip: Rect) {
     }
 }
 
-const MONTHS: [&str; 12] = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
-const MONTHS_GEN: [&str; 12] = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
-const WEEKDAYS: [&str; 7] = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"];
-const WD_SHORT: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
-
 /// Days since 1970-01-01 (Howard Hinnant's days_from_civil).
 pub fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y } as i64;
@@ -1005,78 +1025,6 @@ pub fn month_len(y: i32, m: u32) -> u32 {
     }
 }
 
-fn draw_calendar(d: &Desk, l: &Lay, xf: Xf, cv: &mut Canvas, clip: Rect) {
-    let p = l.panel;
-    let hot = d.tray.hot;
-    let (_, _, day, mon, year) = crate::clock::local_now();
-    let wd = weekday(year, mon, day);
-    for &(h, r) in &l.hits {
-        hot_bg(cv, clip, xf, r, 10, hot == Some(h) && h != Hot::Today);
-        if matches!(h, Hot::Prev | Hot::Next) {
-            let (cx, cy) = r.center();
-            let (cx, cy) = (cx as f32, cy as f32);
-            let s = if h == Hot::Next { 1.0 } else { -1.0 };
-            let lw = 1.8 * xf.scale as f32;
-            cv.line(clip, phys(xf, cx - 2.5 * s, cy - 5.0), phys(xf, cx + 2.5 * s, cy), lw, col::TEXT);
-            cv.line(clip, phys(xf, cx + 2.5 * s, cy), phys(xf, cx - 2.5 * s, cy + 5.0), lw, col::TEXT);
-        }
-    }
-    // Today, in full.
-    let today = format!("{}, {} {}", WEEKDAYS[wd], day, MONTHS_GEN[mon as usize - 1]);
-    let c = if hot == Some(Hot::Today) && d.tray.month != 0 { col::ACCENT } else { col::TEXT };
-    font::draw_text_w(cv, clip, xf, p.x + PAD + 2, p.y + PAD + 18, &today, 15.0, c, p.w - 2 * PAD, font::W::Semi);
-    // The month shown.
-    let total = year * 12 + mon as i32 - 1 + d.tray.month;
-    let (sy, sm) = (total.div_euclid(12), total.rem_euclid(12) as u32 + 1);
-    let y0 = p.y + PAD + 26 + 16;
-    let head = format!("{} {}", MONTHS[sm as usize - 1], sy);
-    font::draw_text_w(cv, clip, xf, p.x + PAD + 2, y0 + 22, &head, 14.0, col::TEXT, p.w, font::W::Semi);
-    let gx = p.x + PAD;
-    let cw = 44;
-    let wy = y0 + 34;
-    for (i, n) in WD_SHORT.iter().enumerate() {
-        let tw = font::text_width(n, 12.0);
-        let c = if i >= 5 { argb(110, 255, 255, 255) } else { col::TEXT_DIM };
-        font::draw_text(cv, clip, xf, gx + i as i32 * cw + (cw - tw) / 2, wy + 16, n, 12.0, c, cw);
-    }
-    // Six weeks from the Monday on or before the 1st.
-    let first = weekday(sy, sm, 1) as i64;
-    let start = days_from_civil(sy, sm, 1) - first;
-    let today_n = days_from_civil(year, mon, day);
-    let gy = wy + 26;
-    for i in 0..42i64 {
-        let n = start + i;
-        let (col_i, row) = ((i % 7) as i32, (i / 7) as i32);
-        let cell = Rect::new(gx + col_i * cw, gy + row * 40, cw, 40);
-        // Day of month of `n`.
-        let (dy, dm, dd) = civil(n);
-        let inside = dy == sy && dm == sm;
-        let s = format!("{dd}");
-        let tw = font::text_width_w(&s, 13.0, font::W::Semi);
-        let disc = Rect::new(cell.x + (cw - 34) / 2, cell.y + 3, 34, 34);
-        let mut c = if inside { col::TEXT } else { argb(70, 255, 255, 255) };
-        if n == today_n {
-            cv.rrect(clip, xf.r(disc), xf.len(17), col::ACCENT);
-            c = col::ACCENT_INK;
-        }
-        font::draw_text_w(cv, clip, xf, cell.x + (cw - tw) / 2, cell.y + 25, &s, 13.0, c, cw, font::W::Semi);
-    }
-}
-
-/// Date of day `n` since 1970-01-01.
-fn civil(n: i64) -> (i32, u32, u32) {
-    let z = n + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    ((if month <= 2 { y + 1 } else { y }) as i32, month, day)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1086,7 +1034,7 @@ mod tests {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         assert_eq!(weekday(1970, 1, 1), 3); // Thursday
         assert_eq!(weekday(2026, 11, 24), 1); // Tuesday
-        assert_eq!(civil(days_from_civil(2024, 2, 29)), (2024, 2, 29));
+        assert_eq!(crate::cal::civil(days_from_civil(2024, 2, 29)), (2024, 2, 29));
         assert_eq!(month_len(2024, 2), 29);
         assert_eq!(month_len(2100, 2), 28);
     }

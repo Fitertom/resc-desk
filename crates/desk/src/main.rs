@@ -2,6 +2,7 @@
 mod anim;
 mod apps;
 mod backend;
+mod cal;
 mod clipboard;
 mod client;
 mod clock;
