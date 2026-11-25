@@ -90,6 +90,8 @@ pub struct Desk {
     pub primary: Option<DKey>,
     pub children: Vec<std::process::Child>,
     pub running: bool,
+    /// Start again (the program file anew) once stopped: `ctl restart`, after an update.
+    pub restart: bool,
     pub next_output_id: u32,
     pub start_ns: u64,
     pub cfg: Config,

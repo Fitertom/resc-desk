@@ -22,6 +22,7 @@ mod jpeg;
 mod layout;
 mod look;
 mod monitors;
+mod update;
 mod net;
 mod png;
 mod pulse;
@@ -109,6 +110,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+    if args.get(1).map(String::as_str) == Some("update") {
+        std::process::exit(update::cli(&args[2..]));
+    }
+    if matches!(args.get(1).map(String::as_str), Some("version") | Some("--version")) {
+        println!("{}", update::BUILD);
+        std::process::exit(0);
     }
     if args.get(1).map(String::as_str) == Some("net") {
         std::process::exit(net_cli());
@@ -198,6 +206,7 @@ fn main() {
         primary: None,
         children: vec![],
         running: true,
+        restart: false,
         next_output_id: 1,
         start_ns: sys::now_ns(),
         cfg: Config {
@@ -376,6 +385,17 @@ fn main() {
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(format!("{socket_path}.lock"));
     let _ = std::fs::remove_file(&ctl_path);
+    // `ctl restart` (after an update): the screen and the devices let go, then the program
+    // file as it is now takes this process's place, with the same arguments.
+    if d.restart {
+        drop(be);
+        drop(d);
+        use std::os::unix::process::CommandExt;
+        let exe = update::exe_path().unwrap_or_else(|_| "resc-desk".into());
+        eprintln!("resc-desk: restarting as {}", exe.display());
+        let err = std::process::Command::new(&exe).args(&args[1..]).exec();
+        eprintln!("resc-desk: restart failed: {err}");
+    }
 }
 
 fn housekeeping(d: &mut Desk, last_minute: &mut u32) {

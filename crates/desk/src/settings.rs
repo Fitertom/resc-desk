@@ -137,6 +137,18 @@ fn hz_name(mhz: i32) -> String {
 #[derive(Clone, Copy, PartialEq)]
 enum Btn {
     Calibrate,
+    /// «О системе»: check for, install, or start the new version (update.rs).
+    Update,
+}
+
+/// Where the update is (update.rs runs on a thread of its own).
+enum Upd {
+    Idle,
+    Busy(&'static str),
+    UpToDate,
+    Newer(crate::update::Release),
+    Installed(String),
+    Failed(String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -377,6 +389,9 @@ struct App {
     chs: [Option<Drop>; 8],
     /// The glass place the «Стекло» page sets.
     place: usize,
+    /// The update: its state, and the thread's answer to come.
+    upd: Upd,
+    upd_rx: Option<std::sync::mpsc::Receiver<Upd>>,
     /// The monitor the «Мониторы» page sets (its name), and a monitor being dragged on
     /// the layout.
     mon: String,
@@ -567,6 +582,53 @@ impl App {
     }
 
     /// Thumbnails that came in. True if any.
+    /// Starts `job` on a thread; its answer becomes the update's state.
+    fn upd_start(&mut self, busy: &'static str, job: impl FnOnce() -> Upd + Send + 'static) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(job());
+        });
+        self.upd = Upd::Busy(busy);
+        self.upd_rx = Some(rx);
+    }
+
+    /// The button: check, install, or restart, depending on where the update is.
+    fn upd_press(&mut self) {
+        match &self.upd {
+            Upd::Busy(_) => {}
+            Upd::Newer(r) => {
+                let r = r.clone();
+                self.upd_start("Скачиваю и проверяю…", move || match crate::update::install(&r) {
+                    Ok(_) => Upd::Installed(r.tag.clone()),
+                    Err(e) => Upd::Failed(e),
+                });
+            }
+            Upd::Installed(_) => send("restart"),
+            _ => self.upd_start("Проверяю…", || match crate::update::check() {
+                Ok(Some(r)) => Upd::Newer(r),
+                Ok(None) => Upd::UpToDate,
+                Err(e) => Upd::Failed(e),
+            }),
+        }
+    }
+
+    fn upd_poll(&mut self) -> bool {
+        let Some(rx) = &self.upd_rx else { return false };
+        match rx.try_recv() {
+            Ok(u) => {
+                self.upd = u;
+                self.upd_rx = None;
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(_) => {
+                self.upd = Upd::Failed("проверка оборвалась".into());
+                self.upd_rx = None;
+                true
+            }
+        }
+    }
+
     fn walls_poll(&mut self) -> bool {
         let Some(rx) = &self.thumbs else { return false };
         let mut any = false;
@@ -1041,7 +1103,29 @@ impl App {
                 }
             }
             Page::About => {
-                v.push(("resc-desk".into(), env!("CARGO_PKG_VERSION").into(), "Свой Wayland-композитор и рабочий стол".into(), Ctl::None));
+                v.push((
+                    "resc-desk".into(),
+                    env!("CARGO_PKG_VERSION").into(),
+                    format!("Свой Wayland-композитор и рабочий стол · версия {}", crate::update::pretty(crate::update::BUILD)),
+                    Ctl::None,
+                ));
+                let (desc, label) = match &self.upd {
+                    Upd::Idle => (format!("Новые версии приходят из релизов github.com/{}", crate::update::REPO), "Проверить"),
+                    Upd::Busy(s) => (s.to_string(), "…"),
+                    Upd::UpToDate => ("Установлена последняя версия".into(), "Проверить"),
+                    Upd::Newer(r) => {
+                        let notes: Vec<&str> = r.notes.lines().map(|l| l.trim().trim_start_matches("- ")).filter(|l| !l.is_empty()).take(4).collect();
+                        let mut s = format!("Есть новая версия от {}", crate::update::pretty(&r.tag));
+                        if !notes.is_empty() {
+                            s.push_str(": ");
+                            s.push_str(&notes.join(" · "));
+                        }
+                        (s, "Обновить")
+                    }
+                    Upd::Installed(t) => (format!("Версия от {} установлена. Перезапуск закроет все открытые окна", crate::update::pretty(t)), "Перезапустить"),
+                    Upd::Failed(e) => (format!("Не получилось: {e}"), "Ещё раз"),
+                };
+                v.push(("Обновления".into(), String::new(), desc, Ctl::Button(Btn::Update, label)));
                 v.push(("Отрисовка".into(), String::new(), m.renderer.clone(), Ctl::None));
                 let mut s = m.session.split_whitespace();
                 let (wl, x) = (s.next().unwrap_or("?"), s.next().unwrap_or("-"));
@@ -1194,6 +1278,7 @@ impl App {
                 self.slider_at(sl, x);
             }
             Ctl::Button(Btn::Calibrate, _) if row.at.contains(x, y) => send("calibrate"),
+            Ctl::Button(Btn::Update, _) if row.at.contains(x, y) => self.upd_press(),
             Ctl::Switch(sw @ (Sw::OutMute | Sw::InMute)) => {
                 let input = sw == Sw::InMute;
                 if let Some(dev) = self.sound_dev(input) {
@@ -1395,6 +1480,8 @@ pub fn run(args: &[String]) -> i32 {
         place: 0,
         mon: String::new(),
         pdrag: None,
+        upd: Upd::Idle,
+        upd_rx: None,
         page_t: Spring::new(1.0, 0.32, 1.0),
         drag: None,
         drag_val: 0.0,
@@ -1423,6 +1510,8 @@ pub fn run(args: &[String]) -> i32 {
             16
         } else if app.thumbs.is_some() && app.page == Page::Wallpaper {
             50
+        } else if app.upd_rx.is_some() {
+            200
         } else if app.page == Page::Sound {
             300
         } else {
@@ -1473,6 +1562,9 @@ pub fn run(args: &[String]) -> i32 {
                 Ev::Key(..) | Ev::Mods(_) => {}
                 _ => {}
             }
+        }
+        if app.upd_poll() {
+            dirty = true;
         }
         if app.walls_poll() && app.page == Page::Wallpaper {
             dirty = true;

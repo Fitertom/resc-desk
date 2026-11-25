@@ -52,6 +52,12 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
     match op {
         "ping" => out.push_str("pong\n"),
         "quit" => d.running = false,
+        "restart" => {
+            d.restart = true;
+            d.running = false;
+        }
+        "version" => out.push_str(&format!("{}
+", crate::update::BUILD)),
         "spawn" => {
             let c = cmd.splitn(2, ' ').nth(1).ok_or("missing command")?;
             crate::life::launch_cmd(d, c);
