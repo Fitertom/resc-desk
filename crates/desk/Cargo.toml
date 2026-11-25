@@ -1,0 +1,13 @@
+[package]
+name = "desk"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "resc-desk"
+path = "src/main.rs"
+
+[dependencies]
+sys.workspace = true
+wl.workspace = true
+

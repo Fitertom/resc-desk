@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/sys", "crates/wl", "crates/desk"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+# Zero third-party crates: everything below std is written here.
+[workspace.dependencies]
+sys = { path = "crates/sys" }
+wl = { path = "crates/wl" }
+
+[profile.dev]
+# The CPU compositor is unusably slow at opt-level 0.
+opt-level = 2
+debug = 1
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = 1

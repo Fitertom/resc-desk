@@ -1,0 +1,8 @@
+[package]
+name = "wl"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[dependencies]
+sys.workspace = true

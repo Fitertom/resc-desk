@@ -1,0 +1,439 @@
+//! Control socket: scripted input, screenshots, introspection. One command per
+//! connection, text protocol, answer ends with "ok" or "err ...".
+use crate::backend::Backend;
+use crate::desk::Desk;
+use crate::input;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::time::Duration;
+
+pub fn accept(d: &mut Desk, b: &mut dyn Backend, l: &UnixListener) {
+    loop {
+        match l.accept() {
+            Ok((s, _)) => handle(d, b, s),
+            Err(_) => break,
+        }
+    }
+}
+
+fn handle(d: &mut Desk, b: &mut dyn Backend, s: UnixStream) {
+    let _ = s.set_nonblocking(false);
+    let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
+    let mut line = String::new();
+    let mut r = BufReader::new(&s);
+    if r.read_line(&mut line).is_err() {
+        return;
+    }
+    let mut out = String::new();
+    let res = run(d, b, line.trim(), &mut out);
+    match res {
+        Ok(()) => out.push_str("ok\n"),
+        Err(e) => out.push_str(&format!("err {e}\n")),
+    }
+    let mut w = &s;
+    let _ = w.write_all(out.as_bytes());
+}
+
+fn btn(name: &str) -> Result<u32, String> {
+    Ok(match name {
+        "left" => input::BTN_LEFT,
+        "right" => input::BTN_RIGHT,
+        "middle" => input::BTN_MIDDLE,
+        _ => return Err(format!("unknown button {name}")),
+    })
+}
+
+fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result<(), String> {
+    let mut it = cmd.split_whitespace();
+    let op = it.next().unwrap_or("");
+    let rest: Vec<&str> = it.collect();
+    let arg = |i: usize| rest.get(i).copied().ok_or_else(|| format!("missing argument {i}"));
+    let t = d.now_ms();
+    match op {
+        "ping" => out.push_str("pong\n"),
+        "quit" => d.running = false,
+        "spawn" => {
+            let c = cmd.splitn(2, ' ').nth(1).ok_or("missing command")?;
+            crate::life::launch_cmd(d, c);
+        }
+        "outputs" => {
+            for (i, o) in d.outputs.iter().enumerate() {
+                out.push_str(&format!(
+                    "{i} {} {}x{} scale {} at {},{} logical {}x{} frames {}\n",
+                    o.name, o.pw, o.ph, o.scale, o.x, o.y, o.lw(), o.lh(), o.frames
+                ));
+            }
+        }
+        "windows" => {
+            for wk in d.stack.clone() {
+                let w = &d.windows[wk];
+                let g = d.surfaces[w.surf].geom();
+                out.push_str(&format!(
+                    "{} title={:?} app={:?} at {},{} size {}x{} tile={:?} min={} ws={} active={} ssd={}{}\n",
+                    wk.idx,
+                    w.title,
+                    w.app_id,
+                    w.x,
+                    w.y,
+                    g.w,
+                    g.h,
+                    w.tile,
+                    w.minimized,
+                    w.workspace,
+                    w.activated,
+                    w.ssd,
+                    w.morph.map_or(String::new(), |m| format!(
+                        " morph={:?}@{:.2} mapped={} buffer={}",
+                        m.kind,
+                        m.progress(),
+                        d.surfaces[w.surf].mapped,
+                        d.surfaces[w.surf].buffer.is_some()
+                    ))
+                ));
+            }
+        }
+        "stats" => {
+            out.push_str(&format!(
+                "clients {} surfaces {} windows {} workspace {}/{} pointer {:.0},{:.0}\n",
+                d.clients.len(),
+                d.surfaces.len(),
+                d.windows.len(),
+                d.workspace + 1,
+                d.workspaces,
+                d.seat.x,
+                d.seat.y
+            ));
+        }
+        "move" => {
+            let x: f64 = arg(0)?.parse().map_err(|_| "bad x")?;
+            let y: f64 = arg(1)?.parse().map_err(|_| "bad y")?;
+            input::pointer_motion(d, x, y, t);
+        }
+        "button" => {
+            let bt = btn(arg(0)?)?;
+            match rest.get(1).copied().unwrap_or("click") {
+                "down" => input::pointer_button(d, bt, true, t),
+                "up" => input::pointer_button(d, bt, false, t),
+                _ => {
+                    input::pointer_button(d, bt, true, t);
+                    input::pointer_button(d, bt, false, t + 1);
+                }
+            }
+        }
+        "click" => {
+            let x: f64 = arg(0)?.parse().map_err(|_| "bad x")?;
+            let y: f64 = arg(1)?.parse().map_err(|_| "bad y")?;
+            input::pointer_motion(d, x, y, t);
+            let bt = btn(rest.get(2).copied().unwrap_or("left"))?;
+            input::pointer_button(d, bt, true, t);
+            input::pointer_button(d, bt, false, t + 1);
+        }
+        "drag" => {
+            // drag x0 y0 x1 y1 [steps]
+            let p: Vec<f64> = (0..4).map(|i| arg(i).and_then(|s| s.parse().map_err(|_| "bad coord".into()))).collect::<Result<_, String>>()?;
+            let steps: usize = rest.get(4).and_then(|s| s.parse().ok()).unwrap_or(10);
+            input::pointer_motion(d, p[0], p[1], t);
+            input::pointer_button(d, input::BTN_LEFT, true, t);
+            for i in 1..=steps {
+                let k = i as f64 / steps as f64;
+                input::pointer_motion(d, p[0] + (p[2] - p[0]) * k, p[1] + (p[3] - p[1]) * k, t + i as u32);
+            }
+            input::pointer_button(d, input::BTN_LEFT, false, t + steps as u32 + 1);
+        }
+        "scroll" => {
+            let v: f64 = arg(0)?.parse().map_err(|_| "bad value")?;
+            input::pointer_axis(d, t, 0, v * 10.0, Some((v * 120.0) as i32), Some(0));
+        }
+        "key" => {
+            let code: u32 = arg(0)?.parse().map_err(|_| "bad keycode")?;
+            match rest.get(1).copied().unwrap_or("tap") {
+                "down" => input::key(d, code, true, t),
+                "up" => input::key(d, code, false, t),
+                _ => {
+                    input::key(d, code, true, t);
+                    input::key(d, code, false, t + 1);
+                }
+            }
+        }
+        "chord" => {
+            let codes: Vec<u32> = arg(0)?.split('+').map(|s| s.parse().map_err(|_| format!("bad key {s}"))).collect::<Result<_, _>>()?;
+            for c in &codes {
+                input::key(d, *c, true, t);
+            }
+            for c in codes.iter().rev() {
+                input::key(d, *c, false, t + 1);
+            }
+        }
+        "calibrate" => crate::layout::toggle_calibration(d),
+        "planes" => {
+            out.push_str(&format!("k {:.4} px/mm, ui_scale {}\n", d.mm_k, d.display_cfg.ui_scale));
+            for o in &d.outputs {
+                let p = o.plane;
+                out.push_str(&format!(
+                    "{} plane {:.2},{:.2} {:.2}x{:.2} mm -> logical {},{} {}x{} scale {:.4}\n",
+                    o.name, p[0], p[1], p[2], p[3], o.x, o.y, o.lw(), o.lh(), o.scale
+                ));
+            }
+        }
+        "set-plane" => {
+            let name = arg(0)?;
+            let v: Vec<f64> = (1..5).map(|i| arg(i).and_then(|s| s.parse().map_err(|_| "bad number".into()))).collect::<Result<_, String>>()?;
+            let o = d.outputs.iter_mut().find(|o| o.name == name).ok_or("no such output")?;
+            o.plane = [v[0], v[1], v[2], v[3]];
+            crate::layout::relayout(d);
+            d.damage_all();
+        }
+        "ui-scale" => {
+            d.display_cfg.ui_scale = arg(0)?.parse::<f64>().map_err(|_| "bad scale")?.clamp(0.5, 4.0);
+            crate::layout::relayout(d);
+            d.damage_all();
+        }
+        "clip" => {
+            for (i, e) in d.clip.items.iter().enumerate() {
+                let t = String::from_utf8_lossy(&e.text).replace('\n', "\\n");
+                out.push_str(&format!("{i}: {t}\n"));
+            }
+            if let Some(k) = d.selection {
+                let own = d.sources.get(k).is_some_and(|s| s.own.is_some());
+                out.push_str(&format!("selection: {}\n", if own { "compositor (history)" } else { "client" }));
+            }
+        }
+        "glue" => {
+            d.display_cfg.glue = match rest.first().copied() {
+                Some("on") => true,
+                Some("off") => false,
+                _ => !d.display_cfg.glue,
+            };
+            crate::layout::relayout(d);
+            d.damage_all();
+            out.push_str(&format!("glue {}
+", if d.display_cfg.glue { "on" } else { "off" }));
+        }
+        "slowmo" => {
+            let k: f32 = arg(0)?.parse().map_err(|_| "slowmo RATE (1: normal)".to_string())?;
+            d.overlay.slowmo = if k > 0.0 && k != 1.0 { k.clamp(0.02, 4.0) } else { 0.0 };
+            out.push_str("ok
+");
+        }
+        "boot" => {
+            crate::boot::start(d, 0);
+            out.push_str("ok\n");
+        }
+        "glass" => {
+            let frosted = match rest.first().copied() {
+                Some("on") => true,
+                Some("off") => false,
+                _ => !crate::glass::frosted(),
+            };
+            let blur = rest.get(1).and_then(|v| v.parse::<f32>().ok()).unwrap_or(crate::glass::blur()).clamp(0.0, crate::glass::MAX_BLUR);
+            crate::glass::set(frosted, blur);
+            d.display_cfg.glass_frosted = frosted;
+            d.display_cfg.glass_blur = blur;
+            d.damage_all();
+            crate::layout::save_config(d).map_err(|e| e.to_string())?;
+        }
+        // bezel PANELS [WINDOWS]: the glass's bezel width, CSS px.
+        "bezel" => {
+            let num = |i: usize| rest.get(i).and_then(|v| v.parse::<f32>().ok());
+            let p = num(0).ok_or("bezel: panels [windows], px")?.clamp(0.0, crate::glass::MAX_BEZEL);
+            let w = num(1).unwrap_or(crate::glass::win_bezel()).clamp(0.0, crate::glass::MAX_BEZEL);
+            crate::glass::set_bezel(p, w);
+            d.display_cfg.glass_bezel = p;
+            d.display_cfg.glass_win_bezel = w;
+            d.damage_all();
+            crate::layout::save_config(d).map_err(|e| e.to_string())?;
+        }
+        // anim launch 0|1 / anim close 0|1|2: how programs start and windows close (life.rs).
+        "anim" => {
+            let v = rest.get(1).and_then(|v| v.parse::<u8>().ok()).ok_or("anim launch|close N")?;
+            match rest.first().copied() {
+                Some("launch") => d.display_cfg.anim_launch = v.min(1),
+                Some("close") => d.display_cfg.anim_close = v.min(2),
+                _ => return Err("anim launch|close N".into()),
+            }
+            crate::layout::save_config(d).map_err(|e| e.to_string())?;
+        }
+        "save" => {
+            crate::layout::save_config(d).map_err(|e| e.to_string())?;
+        }
+        // Everything the settings app shows, one fact per line.
+        "state" => {
+            out.push_str(&format!("glass {} {}
+", crate::glass::frosted() as u8, crate::glass::blur()));
+            out.push_str(&format!("max_blur {}
+", crate::glass::MAX_BLUR));
+            out.push_str(&format!("bezel {} {} {}
+", crate::glass::bezel(), crate::glass::win_bezel(), crate::glass::MAX_BEZEL));
+            out.push_str(&format!("anim {} {}\n", d.display_cfg.anim_launch, d.display_cfg.anim_close));
+            out.push_str(&format!("ui_scale {}
+", d.display_cfg.ui_scale));
+            out.push_str(&format!("wallpaper {}
+", d.display_cfg.wallpaper.as_deref().unwrap_or("default")));
+            out.push_str(&format!("glue {}
+", d.display_cfg.glue as u8));
+            out.push_str(&format!("renderer {}
+", crate::gpu::renderer()));
+            let x = d.xwm.as_ref().map_or("-".to_string(), |x| format!(":{}", x.display));
+            out.push_str(&format!("session {} {}
+", d.socket_name, x));
+            for o in &d.outputs {
+                out.push_str(&format!(
+                    "output {} {} {} {} {} {} {} {} {}
+",
+                    o.name, o.pw, o.ph, o.refresh_mhz, o.plane[0], o.plane[1], o.plane[2], o.plane[3], o.scale
+                ));
+            }
+        }
+        // wallpaper PATH (the rest of the line, spaces allowed) | default
+        "wallpaper" => {
+            let p = rest.join(" ");
+            if p.is_empty() {
+                return Err("wallpaper: a path or default".into());
+            }
+            let p = if p == "default" { None } else { Some(p) };
+            if let Some(f) = &p {
+                std::fs::metadata(f).map_err(|e| format!("{f}: {e}"))?;
+            }
+            // Decoded on a thread; shown (and saved) when ready.
+            crate::wallpaper::set(d, p);
+        }
+        "import-lbm" => {
+            let xml = std::fs::read_to_string(arg(0)?).map_err(|e| e.to_string())?;
+            let n = crate::layout::import_lbm(d, &xml)?;
+            out.push_str(&format!("matched {n} monitors\n"));
+        }
+        "screenshot" => {
+            let path = arg(0)?;
+            let which = rest.get(1).copied().unwrap_or("all");
+            let step: usize = rest.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+            // Optional crop (logical): screenshot PATH all STEP X Y W H
+            let crop: Vec<i32> = rest.iter().skip(3).filter_map(|s| s.parse().ok()).collect();
+            if crop.len() == 4 {
+                d.shot_crop = Some(crate::geom::Rect::new(crop[0], crop[1], crop[2], crop[3]));
+            }
+            let png = screenshot(d, b, which, step);
+            d.shot_crop = None;
+            let png = png?;
+            std::fs::write(path, png).map_err(|e| e.to_string())?;
+            out.push_str(&format!("wrote {path}\n"));
+        }
+        _ => return Err(format!("unknown command {op:?}")),
+    }
+    Ok(())
+}
+
+/// PNG of one output, or of the whole layout ("all", logical placement, scale 1).
+pub fn screenshot(d: &mut Desk, b: &mut dyn Backend, which: &str, step: usize) -> Result<Vec<u8>, String> {
+    let grab = |d: &mut Desk, b: &mut dyn Backend, oi: usize| -> (Vec<u32>, i32, i32) {
+        // A host that stopped sending frames (a hidden nested window) leaves the last
+        // shown frame stale: draw the current state instead.
+        let o = &d.outputs[oi];
+        let stale = o.frame_pending && sys::now_ns().saturating_sub(o.last_frame_ns) > 300_000_000;
+        if stale {
+            return crate::render::render_offscreen(d, oi);
+        }
+        b.read_pixels(d, oi).unwrap_or_else(|| crate::render::render_offscreen(d, oi))
+    };
+    if which != "all" {
+        let oi: usize = which.parse().map_err(|_| "bad output index")?;
+        if oi >= d.outputs.len() {
+            return Err("no such output".into());
+        }
+        let (px, w, h) = grab(d, b, oi);
+        return Ok(crate::png::encode(&px, w, h, w as usize, step));
+    }
+    // Whole layout as it stands on the physical plane: every output resampled to
+    // logical units (so mixed densities line up), gaps between monitors dark grey.
+    let bounds = d.shot_crop.unwrap_or_else(|| d.layout_bounds());
+    let step = step.max(1) as i32;
+    let (bw, bh) = ((bounds.w.max(1) + step - 1) / step, (bounds.h.max(1) + step - 1) / step);
+    let mut img = vec![0xff30_3030u32; (bw * bh) as usize];
+    for oi in 0..d.outputs.len() {
+        let r = d.outputs[oi].rect();
+        let s = d.outputs[oi].scale;
+        let (px, w, h) = grab(d, b, oi);
+        for iy in 0..bh {
+            let ly = bounds.y + iy * step;
+            if ly < r.y || ly >= r.y1() {
+                continue;
+            }
+            let sy = (((ly - r.y) as f64 + 0.5) * s) as i32;
+            if sy >= h {
+                continue;
+            }
+            for ix in 0..bw {
+                let lx = bounds.x + ix * step;
+                if lx < r.x || lx >= r.x1() {
+                    continue;
+                }
+                let sx = (((lx - r.x) as f64 + 0.5) * s) as i32;
+                if sx < w {
+                    img[(iy * bw + ix) as usize] = px[(sy * w + sx) as usize];
+                }
+            }
+        }
+    }
+    Ok(crate::png::encode(&img, bw, bh, bw as usize, 1))
+}
+
+/// `resc-desk ctl <command...>`: send one command, print the answer.
+pub fn ctl(args: &[String]) -> i32 {
+    let path = std::env::var("RESC_DESK_CTL").ok().or_else(find_ctl);
+    let Some(path) = path else {
+        eprintln!("no resc-desk control socket found");
+        return 1;
+    };
+    let mut s = match UnixStream::connect(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("connect {path}: {e}");
+            return 1;
+        }
+    };
+    let _ = s.write_all(format!("{}\n", args.join(" ")).as_bytes());
+    let mut r = BufReader::new(s);
+    let mut code = 0;
+    let mut line = String::new();
+    while r.read_line(&mut line).map_or(false, |n| n > 0) {
+        print!("{line}");
+        if line.starts_with("err") {
+            code = 1;
+        }
+        line.clear();
+    }
+    code
+}
+
+/// One command to the running compositor; its answer (without the final "ok").
+pub fn request(cmd: &str) -> Result<String, String> {
+    let path = std::env::var("RESC_DESK_CTL").ok().or_else(find_ctl).ok_or("no resc-desk control socket")?;
+    let mut s = UnixStream::connect(&path).map_err(|e| format!("{path}: {e}"))?;
+    let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+    s.write_all(format!("{cmd}
+").as_bytes()).map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    let mut r = BufReader::new(s);
+    let mut line = String::new();
+    while r.read_line(&mut line).map_or(false, |n| n > 0) {
+        if line.starts_with("err") {
+            return Err(line.trim().to_string());
+        }
+        if line.trim() != "ok" {
+            text.push_str(&line);
+        }
+        line.clear();
+    }
+    Ok(text)
+}
+
+fn find_ctl() -> Option<String> {
+    let dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
+    let mut v: Vec<String> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path().to_string_lossy().to_string())
+        .filter(|p| p.ends_with(".ctl") && p.contains("resc-desk"))
+        .collect();
+    v.sort();
+    v.pop()
+}
