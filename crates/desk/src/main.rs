@@ -394,6 +394,8 @@ fn main() {
         let exe = update::exe_path().unwrap_or_else(|_| "resc-desk".into());
         eprintln!("resc-desk: restarting as {}", exe.display());
         let err = std::process::Command::new(&exe).args(&args[1..]).exec();
+        eprintln!("resc-desk: restart failed: {err}; trying {}", args[0]);
+        let err = std::process::Command::new(&args[0]).args(&args[1..]).exec();
         eprintln!("resc-desk: restart failed: {err}");
     }
 }

@@ -130,9 +130,14 @@ pub fn check() -> Result<Option<Release>, String> {
     Ok(newer.then_some(rel))
 }
 
-/// The running program's file (symlinks followed).
+/// The running program's file (symlinks followed). Once an update has put a new file in its
+/// place, Linux names the running one `<path> (deleted)`: the path is still the program's.
 pub fn exe_path() -> Result<std::path::PathBuf, String> {
     let p = std::env::current_exe().map_err(|e| e.to_string())?;
+    let p = match p.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(s) => std::path::PathBuf::from(s),
+        None => p,
+    };
     Ok(std::fs::canonicalize(&p).unwrap_or(p))
 }
 
@@ -286,5 +291,28 @@ mod tests {
     fn versions_read_as_dates() {
         assert_eq!(pretty("r1764090000-1a2b3c4"), "25.11.2025 17:00 UTC · 1a2b3c4");
         assert_eq!(pretty("dev"), "dev");
+    }
+}
+
+#[cfg(test)]
+mod exe_tests {
+    /// The running file replaced by an update: the restart starts the new one by its path.
+    #[test]
+    fn replaced_program_keeps_its_path() {
+        let dir = std::env::temp_dir().join(format!("resc-exe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("prog");
+        std::fs::copy("/bin/sleep", &exe).unwrap();
+        let mut child = std::process::Command::new(&exe).arg("5").spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::fs::copy("/bin/true", dir.join("new")).unwrap();
+        std::fs::rename(dir.join("new"), &exe).unwrap();
+        let link = std::fs::read_link(format!("/proc/{}/exe", child.id())).unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        let s = link.to_string_lossy().to_string();
+        assert!(s.ends_with(" (deleted)"), "{s}");
+        assert_eq!(std::path::PathBuf::from(s.strip_suffix(" (deleted)").unwrap()), exe);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
