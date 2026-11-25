@@ -710,6 +710,13 @@ fn drag_ghost(app: &App, cv: &mut Canvas) {
     let sel = app.selected();
     let Some(&first) = sel.first() else { return };
     let clip = cv.bounds();
+    // On the desktop: the cells the icons will land in.
+    if app.desk && app.drag_to.is_none() && matches!(p.hit, Hit::Item(_)) {
+        for (_, c) in app.desk_plan((p.x, p.y), (x, y)) {
+            let r = app.screen(app.desk_cell_rect(c));
+            cv.rrect(clip, r, 8, ui::accent(40));
+        }
+    }
     let (x, y) = (x as i32, y as i32);
     let ic = Rect::new(x - 20, y - 14, 40, 40);
     card(cv, clip, ic.inflate(4), 10, argb(180, 30, 32, 43));

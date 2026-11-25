@@ -853,6 +853,11 @@ impl App {
             return;
         }
         if p.dragging {
+            // Desktop icons dropped on the wallpaper (not into a folder): they move there.
+            if self.desk && self.drag_to.is_none() && self.outgoing.is_none() && p.button == BTN_LEFT && matches!(p.hit, Hit::Item(_)) && self.view_rect().contains(x, y) {
+                self.desk_move((p.x, p.y), (x, y));
+                return;
+            }
             let Some((to, eff)) = self.drag_to.clone() else { return };
             if p.button == BTN_RIGHT {
                 self.drop_paths = None;

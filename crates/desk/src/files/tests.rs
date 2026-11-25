@@ -1183,3 +1183,93 @@ fn monkey() {
         }
     }
 }
+
+impl Sim {
+    /// A left-button drag from (x0, y0) to (x1, y1), in steps.
+    fn drag(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, what: &str) {
+        self.log.push(format!("drag {x0:.0},{y0:.0} → {x1:.0},{y1:.0} {what}"));
+        self.app.last_click = (0, Hit::None);
+        self.app.motion(x0, y0);
+        self.app.button(LEFT, true);
+        for k in 1..=8 {
+            let t = k as f64 / 8.0;
+            self.app.motion(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+        }
+        self.app.button(LEFT, false);
+        self.settle();
+    }
+
+    fn cell_of(&self, name: &str) -> (i32, i32) {
+        let i = self.item(name);
+        self.app.desk_cell_of(i)
+    }
+
+    fn cell_center(&self, c: (i32, i32)) -> (f64, f64) {
+        let r = self.app.screen(self.app.desk_cell_rect(c));
+        (r.x as f64 + r.w as f64 / 2.0, r.y as f64 + r.h as f64 / 2.0)
+    }
+}
+
+#[test]
+fn desktop_icons_stay_where_put() {
+    let mut s = Sim::desk();
+    let cells = |s: &Sim| -> Vec<(i32, i32)> { (0..s.app.items.len()).map(|i| s.app.desk_cell_of(i)).collect() };
+    let distinct = |s: &Sim| {
+        let v = cells(s);
+        let set: std::collections::HashSet<_> = v.iter().collect();
+        assert_eq!(set.len(), v.len(), "two icons in one cell: {v:?}");
+    };
+    // Onto an empty cell far away: it is there, the others did not move.
+    let before: Vec<((i32, i32), String)> = s.app.items.iter().enumerate().map(|(i, it)| (s.app.desk_cell_of(i), it.e.name.clone())).collect();
+    let from = s.cell_center(s.cell_of("Отчёт.pdf"));
+    let to = s.cell_center((10, 3));
+    s.drag(from.0, from.1, to.0, to.1, "Отчёт.pdf to cell 10,3");
+    assert_eq!(s.cell_of("Отчёт.pdf"), (10, 3));
+    for (c, n) in &before {
+        if n != "Отчёт.pdf" {
+            assert_eq!(s.cell_of(n), *c, "{n} moved");
+        }
+    }
+    distinct(&s);
+    // Kept: the desktop started anew has them in the same places.
+    let now = cells(&s);
+    s.app = App::new(Loc::Dir(desktop::desktop_dir()), 1600, 836);
+    s.app.desk = true;
+    s.app.view = s.app.view_for(&s.app.loc().clone());
+    s.app.lay();
+    s.settle();
+    assert_eq!(cells(&s), now, "the places were not kept");
+    // Onto another icon: the nearest free cell, nobody shares one.
+    let from = s.cell_center(s.cell_of("фото.png"));
+    let to = s.cell_center((10, 3));
+    s.drag(from.0, from.1, to.0, to.1, "фото.png onto Отчёт.pdf");
+    let c = s.cell_of("фото.png");
+    assert_eq!(s.cell_of("Отчёт.pdf"), (10, 3));
+    assert!((c.0 - 10).abs() + (c.1 - 3).abs() == 1, "фото.png went to {c:?}");
+    distinct(&s);
+    // A selection moves together, keeping its shape.
+    let (a, b) = (s.cell_of("фото.png"), s.cell_of("Отчёт.pdf"));
+    let (ax, ay) = s.cell_center(a);
+    s.click_b(LEFT, ax, ay, "select фото.png");
+    let (bx, by) = s.cell_center(b);
+    s.mods(true, false, false);
+    s.click_b(LEFT, bx, by, "ctrl-select Отчёт.pdf");
+    s.mods(false, false, false);
+    let to = s.cell_center((a.0 + 2, a.1 + 2));
+    s.drag(ax, ay, to.0, to.1, "both by 2,2");
+    assert_eq!(s.cell_of("фото.png"), (a.0 + 2, a.1 + 2));
+    assert_eq!(s.cell_of("Отчёт.pdf"), (b.0 + 2, b.1 + 2));
+    distinct(&s);
+    // Dragged onto a folder it still goes into the folder (a move, not a place).
+    let folder = s.cell_center(s.cell_of("Проекты 2026"));
+    let from = s.cell_center(s.cell_of("Список дел.txt"));
+    s.click_b(LEFT, from.0, from.1, "select Список дел.txt");
+    s.drag(from.0, from.1, folder.0, folder.1, "Список дел.txt into the folder");
+    assert!(s.home().join("Desktop/Проекты 2026/Список дел.txt").exists(), "not moved into the folder");
+    // «Сортировка» lines them all up from the top left again.
+    s.app.act(Act::Sort(Col::Name));
+    s.settle();
+    let mut v = cells(&s);
+    v.sort();
+    assert_eq!(v, (0..v.len() as i32).map(|r| (0, r)).collect::<Vec<_>>());
+}

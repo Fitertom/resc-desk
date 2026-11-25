@@ -575,6 +575,9 @@ pub struct App {
     pub drop_paths: Option<Vec<PathBuf>>,
     /// The desktop's icons rather than a window (desktop.rs).
     pub desk: bool,
+    /// Their kept cells by name (desktop.rs), read on the first layout.
+    pub desk_cells: HashMap<String, (i32, i32)>,
+    pub desk_loaded: bool,
     spring_at: Option<(Hit, u64)>,
     pub load_err: Option<String>,
     temp_n: u32,
@@ -772,6 +775,8 @@ impl App {
             tab_drop_at: None,
             drop_paths: None,
             desk: false,
+            desk_cells: HashMap::new(),
+            desk_loaded: false,
             spring_at: None,
             load_err: None,
             temp_n: 0,
@@ -2043,6 +2048,9 @@ impl App {
                 if let Some(f) = self.fresh.iter_mut().find(|f| **f == old) {
                     *f = name.to_string();
                 }
+                if self.desk {
+                    self.desk_renamed(&old, name);
+                }
                 self.reload(false);
                 if let Some(i) = self.items.iter().position(|it| it.e.path == to) {
                     self.select_only(i);
@@ -3296,6 +3304,9 @@ impl App {
                     self.view.desc = matches!(c, Col::Date | Col::Deleted | Col::Size);
                 }
                 self.resort();
+                if self.desk {
+                    self.desk_line_up();
+                }
             }
             Act::Desc(d) => {
                 self.view.desc = d;
