@@ -1,8 +1,8 @@
 #!/bin/sh
 # A release for the in-system updater (update.rs): the program built for x86_64 Linux and
 # its SHA-256, tagged r<commit time>-<commit>, notes from the commits since the last one.
-# Run on Windows (Git Bash) with the Arch WSL distro and an authorised gh; the tree must be
-# committed and pushed.
+# Run on Windows (Git Bash) with the Arch WSL distro, or on Linux itself (built here), with an
+# authorised gh; the tree must be committed and pushed.
 set -eu
 cd "$(dirname "$0")/.."
 DISTRO=${DISTRO:-archlinux}
@@ -16,15 +16,23 @@ if gh release view "$VER" >/dev/null 2>&1; then
     echo "$VER is out already"
     exit 0
 fi
-WIN=$(pwd -W 2>/dev/null || pwd)
-# C:/Users/... (pwd -W) → /mnt/c/Users/...
-DRIVE=$(echo "$WIN" | cut -c1 | tr 'A-Z' 'a-z')
-SRC="/mnt/$DRIVE$(echo "$WIN" | cut -c3-)"
-echo "building $VER in $DISTRO ($SRC)"
-wsl -d "$DISTRO" -- bash -lc "cd '$SRC' && RESC_BUILD_OVERRIDE=$VER CARGO_TARGET_DIR=\$HOME/target cargo build --release -q -p desk && \$HOME/target/release/resc-desk version && mkdir -p /tmp/resc-release && cp \$HOME/target/release/resc-desk /tmp/resc-release/resc-desk-x86_64 && cd /tmp/resc-release && sha256sum resc-desk-x86_64 > resc-desk-x86_64.sha256 && cat resc-desk-x86_64.sha256"
 OUT=$(mktemp -d)
-wsl -d "$DISTRO" -- sh -c "cat /tmp/resc-release/resc-desk-x86_64" > "$OUT/resc-desk-x86_64"
-wsl -d "$DISTRO" -- sh -c "cat /tmp/resc-release/resc-desk-x86_64.sha256" > "$OUT/resc-desk-x86_64.sha256"
+if command -v wsl >/dev/null 2>&1 || command -v wsl.exe >/dev/null 2>&1; then
+    WIN=$(pwd -W 2>/dev/null || pwd)
+    # C:/Users/... (pwd -W) → /mnt/c/Users/...
+    DRIVE=$(echo "$WIN" | cut -c1 | tr 'A-Z' 'a-z')
+    SRC="/mnt/$DRIVE$(echo "$WIN" | cut -c3-)"
+    echo "building $VER in $DISTRO ($SRC)"
+    wsl -d "$DISTRO" -- bash -lc "cd '$SRC' && RESC_BUILD_OVERRIDE=$VER CARGO_TARGET_DIR=\$HOME/target cargo build --release -q -p desk && \$HOME/target/release/resc-desk version && mkdir -p /tmp/resc-release && cp \$HOME/target/release/resc-desk /tmp/resc-release/resc-desk-x86_64 && cd /tmp/resc-release && sha256sum resc-desk-x86_64 > resc-desk-x86_64.sha256 && cat resc-desk-x86_64.sha256"
+    wsl -d "$DISTRO" -- sh -c "cat /tmp/resc-release/resc-desk-x86_64" > "$OUT/resc-desk-x86_64"
+    wsl -d "$DISTRO" -- sh -c "cat /tmp/resc-release/resc-desk-x86_64.sha256" > "$OUT/resc-desk-x86_64.sha256"
+else
+    echo "building $VER here"
+    RESC_BUILD_OVERRIDE=$VER cargo build --release -q -p desk
+    ./target/release/resc-desk version
+    cp target/release/resc-desk "$OUT/resc-desk-x86_64"
+    (cd "$OUT" && sha256sum resc-desk-x86_64 > resc-desk-x86_64.sha256 && cat resc-desk-x86_64.sha256)
+fi
 # The copy must be the very file that was hashed.
 WANT=$(cut -d' ' -f1 "$OUT/resc-desk-x86_64.sha256")
 GOT=$(sha256sum "$OUT/resc-desk-x86_64" | cut -d' ' -f1)
