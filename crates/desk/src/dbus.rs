@@ -448,6 +448,11 @@ impl Bus {
         }
     }
 
+    /// How long a call may wait for its reply (Bluetooth pairing takes seconds).
+    pub fn set_timeout(&mut self, t: Duration) {
+        let _ = self.s.set_read_timeout(Some(t));
+    }
+
     /// org.freedesktop.DBus.Properties.Get.
     pub fn prop(&mut self, dest: &str, path: &str, iface: &str, name: &str) -> std::io::Result<Val> {
         let v = self.call(dest, path, "org.freedesktop.DBus.Properties", "Get", &[Val::S(iface.into()), Val::S(name.into())])?;

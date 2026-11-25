@@ -49,15 +49,17 @@ enum Page {
     Wallpaper,
     Displays,
     Sound,
+    Bluetooth,
     About,
 }
 
-const PAGES: [(Page, &str, &str); 6] = [
+const PAGES: [(Page, &str, &str); 7] = [
     (Page::Look, "Оформление", "preferences-desktop-theme"),
     (Page::Glass, "Стекло", "preferences-desktop-effects;preferences-system-windows;preferences-desktop-theme"),
     (Page::Wallpaper, "Обои", "preferences-desktop-wallpaper;preferences-desktop-background"),
     (Page::Displays, "Мониторы", "preferences-desktop-display"),
     (Page::Sound, "Звук", "preferences-desktop-sound;audio-volume-high;multimedia-volume-control"),
+    (Page::Bluetooth, "Bluetooth", "bluetooth;preferences-system-bluetooth;bluetooth-active;blueman"),
     (Page::About, "О системе", "computer;help-about"),
 ];
 
@@ -67,6 +69,8 @@ const TH: usize = 180;
 const TILE_GAP: i32 = 12;
 const TILE_LABEL: i32 = 24;
 const DEV_ROW: i32 = 38;
+/// «Удалить» at the right end of a paired Bluetooth device's row.
+const BT_FORGET_W: i32 = 84;
 
 /// The monitor layout's height on the «Мониторы» page.
 const PLANE_H: i32 = 230;
@@ -84,6 +88,8 @@ enum Sw {
     Hdr,
     /// The taskbar on every monitor.
     TbAll,
+    /// The Bluetooth adapter's power.
+    BtPower,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -165,6 +171,8 @@ enum Ctl {
     Choice(Ch),
     /// The monitors on the desk, to drag about.
     Plane,
+    /// Bluetooth devices: paired (false) or found nearby (true).
+    Bt(bool),
 }
 
 // ------------------------------------------------------------------ the compositor's state
@@ -413,6 +421,8 @@ struct App {
     pulse: Option<crate::pulse::Pulse>,
     audio: crate::pulse::Audio,
     pulse_err: Option<String>,
+    /// Bluetooth (bt.rs): its thread, started with the page.
+    bt: Option<crate::bt::Bt>,
 }
 
 /// A monitor dragged on the layout: its output, where it was taken (mm, from its corner),
@@ -789,6 +799,11 @@ impl App {
         if input { &self.audio.sources } else { &self.audio.sinks }
     }
 
+    /// Bluetooth devices: paired (`others` false) or found nearby.
+    fn bt_devs(&self, others: bool) -> Vec<crate::bt::Dev> {
+        self.bt.as_ref().map_or(Vec::new(), |b| b.state.devices.iter().filter(|d| d.paired != others).cloned().collect())
+    }
+
     fn ui_scale(&self) -> f64 {
         if self.drag == Some(Sl::UiScale) { self.drag_val } else { self.m.ui_scale }
     }
@@ -828,6 +843,8 @@ impl App {
         for (sw, v) in [(Sw::Primary, mon.primary), (Sw::MonOn, mon.on), (Sw::Vrr, mon.vrr), (Sw::Hdr, mon.hdr), (Sw::TbAll, self.m.taskbar_all)] {
             self.anims.drive(AK::Switch(sw), on(v), SPR_SWITCH);
         }
+        let bt_on = self.bt.as_ref().map_or(false, |b| b.state.powered);
+        self.anims.drive(AK::Switch(Sw::BtPower), on(bt_on), SPR_SWITCH);
         for (sw, input) in [(Sw::OutMute, false), (Sw::InMute, true)] {
             let muted = self.sound_dev(input).map_or(false, |d| d.mute);
             self.anims.drive(AK::Switch(sw), on(muted), SPR_SWITCH);
@@ -1102,6 +1119,28 @@ impl App {
                     v.push(("Устройство ввода".into(), String::new(), String::new(), Ctl::Devices(true)));
                 }
             }
+            Page::Bluetooth => {
+                let Some(st) = self.bt.as_ref().map(|b| &b.state) else { return v };
+                if let Some(m) = &st.missing {
+                    v.push(("Bluetooth недоступен".into(), String::new(), m.clone(), Ctl::None));
+                    return v;
+                }
+                let desc = match (&st.error, st.powered) {
+                    (Some(e), _) => e.clone(),
+                    (None, true) if st.discovering => "Включён · ищу устройства рядом. Наушники переведите в режим сопряжения".into(),
+                    (None, true) => "Включён".into(),
+                    (None, false) => "Выключен".into(),
+                };
+                v.push(("Bluetooth".into(), String::new(), desc, Ctl::Switch(Sw::BtPower)));
+                if st.powered {
+                    if st.devices.iter().any(|d| d.paired) {
+                        v.push(("Мои устройства".into(), String::new(), "Нажмите, чтобы подключить или отключить".into(), Ctl::Bt(false)));
+                    }
+                    let found = st.devices.iter().filter(|d| !d.paired).count();
+                    let desc = if found == 0 { "Пока ничего не найдено".to_string() } else { "Нажмите, чтобы сопрячь и подключить".to_string() };
+                    v.push(("Другие устройства".into(), String::new(), desc, Ctl::Bt(true)));
+                }
+            }
             Page::About => {
                 v.push((
                     "resc-desk".into(),
@@ -1173,6 +1212,7 @@ impl App {
                     h += 6 + rows * (th + TILE_LABEL + TILE_GAP) - TILE_GAP;
                 }
                 Ctl::Devices(input) => h += self.devices(input).len().max(1) as i32 * DEV_ROW - 6,
+                Ctl::Bt(others) => h += (self.bt_devs(others).len() as i32 * DEV_ROW - 6).max(0),
                 Ctl::Choice(ch) => h += self.opts(ch).len() as i32 * DEV_ROW - 6,
                 Ctl::Plane => h += PLANE_H,
                 _ => {}
@@ -1182,7 +1222,7 @@ impl App {
                 Ctl::Switch(_) => Rect::new(card.x1() - CARD_PAD - SWITCH_W as i32, card.y + (card.h - SWITCH_H as i32) / 2, SWITCH_W as i32, SWITCH_H as i32),
                 Ctl::Slider(_) => Rect::new(card.x + CARD_PAD, card.y1() - CARD_PAD - SLIDER_H + 4, card.w - 2 * CARD_PAD, SLIDER_H),
                 Ctl::Button(..) => Rect::new(card.x1() - CARD_PAD - BTN_W, card.y + (card.h - BTN_H) / 2, BTN_W, BTN_H),
-                Ctl::Walls | Ctl::Devices(_) | Ctl::Choice(_) | Ctl::Plane => Rect::from_edges(card.x + CARD_PAD, card.y + body_y + 6, card.x1() - CARD_PAD, card.y1() - CARD_PAD),
+                Ctl::Walls | Ctl::Devices(_) | Ctl::Choice(_) | Ctl::Plane | Ctl::Bt(_) => Rect::from_edges(card.x + CARD_PAD, card.y + body_y + 6, card.x1() - CARD_PAD, card.y1() - CARD_PAD),
                 Ctl::None => Rect::default(),
             };
             rows.push(Row { name, value, desc, ctl, card, at });
@@ -1201,7 +1241,16 @@ impl App {
             self.anims.0.retain(|(k, _)| !matches!(k, AK::WallHot(_) | AK::WallSel(_) | AK::DevHot(..)));
             self.devs = [None, None];
         }
+        // Looking for devices only while the page is open.
+        if let Some(b) = &self.bt {
+            b.send(crate::bt::Cmd::Scan(p == Page::Bluetooth));
+        }
         match p {
+            Page::Bluetooth if self.bt.is_none() => {
+                let b = crate::bt::Bt::start();
+                b.send(crate::bt::Cmd::Scan(true));
+                self.bt = Some(b);
+            }
             Page::Sound => self.sound_refresh(),
             Page::Wallpaper => self.walls_start(),
             _ => {}
@@ -1351,6 +1400,31 @@ impl App {
                     self.pdrag = Some(PDrag { i, grab: (mx - o.plane[0], my - o.plane[1]), px, moved: false });
                 }
             }
+            Ctl::Switch(Sw::BtPower) => {
+                if let Some(b) = &self.bt {
+                    b.send(crate::bt::Cmd::Power(!b.state.powered));
+                }
+            }
+            Ctl::Bt(others) => {
+                let i = ((y - row.at.y as f64) / DEV_ROW as f64).floor();
+                let dev = if i >= 0.0 { self.bt_devs(others).get(i as usize).cloned() } else { None };
+                if let (Some(d), Some(b)) = (dev, &self.bt) {
+                    use crate::bt::Cmd;
+                    let r = dev_rect(row.at, i as usize);
+                    let busy = b.state.busy.is_some();
+                    if !others && x >= (r.x1() - BT_FORGET_W) as f64 {
+                        b.send(Cmd::Forget(d.path));
+                    } else if busy {
+                        // One at a time.
+                    } else if others {
+                        b.send(Cmd::Pair(d.path));
+                    } else if d.connected {
+                        b.send(Cmd::Disconnect(d.path));
+                    } else {
+                        b.send(Cmd::Connect(d.path));
+                    }
+                }
+            }
             Ctl::Devices(input) => {
                 let i = ((y - row.at.y as f64) / DEV_ROW as f64).floor();
                 if i >= 0.0 {
@@ -1457,6 +1531,7 @@ pub fn run(args: &[String]) -> i32 {
         Some("displays") | Some("monitors") => Page::Displays,
         Some("about") => Page::About,
         Some("sound") => Page::Sound,
+        Some("bluetooth") | Some("bt") => Page::Bluetooth,
         Some("wallpaper") | Some("wallpapers") => Page::Wallpaper,
         Some("glass") => Page::Glass,
         _ => Page::Look,
@@ -1494,6 +1569,7 @@ pub fn run(args: &[String]) -> i32 {
         pulse: None,
         audio: Default::default(),
         pulse_err: None,
+        bt: None,
     };
     app.refresh();
     let first = app.page;
@@ -1512,7 +1588,7 @@ pub fn run(args: &[String]) -> i32 {
             50
         } else if app.upd_rx.is_some() {
             200
-        } else if app.page == Page::Sound {
+        } else if app.page == Page::Sound || app.page == Page::Bluetooth {
             300
         } else {
             1000
@@ -1574,6 +1650,9 @@ pub fn run(args: &[String]) -> i32 {
             dirty = true;
         }
         if app.page == Page::Sound && app.sound_poll() {
+            dirty = true;
+        }
+        if app.bt.as_mut().map_or(false, |b| b.poll()) && app.page == Page::Bluetooth {
             dirty = true;
         }
         // Monitors change elsewhere too (Win+P, plugged in): read them again now and then.
@@ -1933,6 +2012,7 @@ fn draw_page(app: &App, cv: &mut Canvas, l: &Layout) {
                     font::draw_text_w(cv, vclip, xf, r.x + 38, r.y + 23, &name, 13.5, text_color(0.8 + 0.2 * c), r.w - 60, font::W::Semi);
                 }
             }
+            Ctl::Bt(others) => draw_bt(app, cv, vclip, xf, row.at, others),
             Ctl::Devices(input) => {
                 let devs = app.devices(input);
                 for i in 0..devs.len() {
@@ -2034,5 +2114,52 @@ fn draw_page(app: &App, cv: &mut Canvas, l: &Layout) {
         let th = (v.h * v.h / l.total).max(24);
         let ty = v.y + (v.h - th) * app.scroll.value.round() as i32 / (l.total - v.h).max(1);
         cv.rrect(clip, Rect::new(app.w - 8, ty, 4, th), 2, argb(70, 255, 255, 255));
+    }
+}
+
+/// A Bluetooth list: each device with its state on the right; paired ones also «Удалить».
+fn draw_bt(app: &App, cv: &mut Canvas, vclip: Rect, xf: Xf, at: Rect, others: bool) {
+    let Some(st) = app.bt.as_ref().map(|b| &b.state) else { return };
+    for (i, d) in app.bt_devs(others).iter().enumerate() {
+        let r = dev_rect(at, i);
+        let hot = app.ptr.map_or(false, |(x, y)| r.contains(x, y));
+        if hot {
+            cv.rrect(vclip, xf.r(r), xf.len(10), argb(14, 255, 255, 255));
+        }
+        let busy = st.busy.as_ref().filter(|(p, _)| *p == d.path).map(|(_, w)| *w);
+        let (cx, cy) = (r.x as f32 + 20.0, r.y as f32 + r.h as f32 / 2.0);
+        let lit = d.connected || busy.is_some();
+        cv.ring(vclip, crate::shell::phys(xf, cx, cy), 7.0, 1.5, if lit { crate::look::accent() } else { text_color(0.5) });
+        if d.connected {
+            cv.rrect(vclip, xf.r(Rect::new(cx as i32 - 3, cy as i32 - 3, 7, 7)), xf.len(4), crate::look::accent());
+        }
+        let status = match busy {
+            Some(w) => w.to_string(),
+            None if d.connected => match d.battery {
+                Some(b) => format!("Подключено · {b} %"),
+                None => "Подключено".into(),
+            },
+            None if d.paired => "Не подключено".into(),
+            None => d.kind().into(),
+        };
+        let right = if others { 12 } else { BT_FORGET_W };
+        let sw = font::text_width(&status, 12.5);
+        let name_w = (r.w - 38 - right - sw - 16).max(40);
+        // Two devices with one name (earbuds, a second unit): the address's end tells them apart.
+        let twin = st.devices.iter().filter(|o| o.name == d.name).count() > 1;
+        let label = match (d.name.is_empty(), twin) {
+            (true, _) => d.addr.clone(),
+            (false, true) => format!("{} · {}", d.name, d.addr.get(12..).unwrap_or(&d.addr)),
+            (false, false) => d.name.clone(),
+        };
+        let name = crate::shell::ellipsize(&label, 13.5, font::W::Semi, name_w);
+        font::draw_text_w(cv, vclip, xf, r.x + 38, r.y + 23, &name, 13.5, text_color(0.9), name_w, font::W::Semi);
+        let sc = if lit { crate::look::accent() } else { text_color(0.55) };
+        font::draw_text(cv, vclip, xf, r.x1() - right - sw, r.y + 23, &status, 12.5, sc, sw + 4);
+        if !others {
+            let fx = r.x1() - BT_FORGET_W + 14;
+            let fhot = app.ptr.map_or(false, |(x, y)| r.contains(x, y) && x >= (r.x1() - BT_FORGET_W) as f64);
+            font::draw_text(cv, vclip, xf, fx, r.y + 23, "Удалить", 12.5, text_color(if fhot { 0.95 } else { 0.4 }), BT_FORGET_W);
+        }
     }
 }
