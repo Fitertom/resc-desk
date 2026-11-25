@@ -438,7 +438,7 @@ fn square_planes(pixels: &[[i64; 4]], planes: &mut [[f64; 4]]) {
 /// height (LittleBigMouse-style). None when nothing is there (then it is clamped).
 pub fn cross_gap(d: &Desk, from: (f64, f64), to: (f64, f64)) -> Option<(f64, f64)> {
     let rects: Vec<Rect> = d.outputs.iter().map(|o| o.rect()).collect();
-    cross_gap_in(&rects, from, to)
+    cross_gap_in(&rects, from, to, None)
 }
 
 fn output_in(rects: &[Rect], x: f64, y: f64) -> Option<usize> {
@@ -485,7 +485,7 @@ fn wall_motion_in(rects: &[Rect], from: (f64, f64), to: (f64, f64), depth: u32) 
     // Nothing touches here; a monitor across a bezel gap still counts.
     // Judged where the pointer meets the edge, not where the step would end.
     let across = if vertical_edge { (to.0, probe.1) } else { (probe.0, to.1) };
-    if let Some(p) = cross_gap_in(rects, from, across) {
+    if let Some(p) = cross_gap_in(rects, from, across, Some(vertical_edge)) {
         return p;
     }
     // A wall: stop at it and keep the motion along it.
@@ -494,10 +494,17 @@ fn wall_motion_in(rects: &[Rect], from: (f64, f64), to: (f64, f64), depth: u32) 
     wall_motion_in(rects, start, slid, depth + 1)
 }
 
-fn cross_gap_in(rects: &[Rect], from: (f64, f64), to: (f64, f64)) -> Option<(f64, f64)> {
+/// `sideways`: only across a left/right edge (true) or a top/bottom one (false); None: either.
+fn cross_gap_in(rects: &[Rect], from: (f64, f64), to: (f64, f64), sideways: Option<bool>) -> Option<(f64, f64)> {
     let cur = output_in(rects, from.0, from.1)?;
     let c = rects[cur];
-    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let (mut dx, mut dy) = (to.0 - from.0, to.1 - from.1);
+    // Leaving through the bottom with a little sideways drift is not a move to the side.
+    match sideways {
+        Some(true) => dy = 0.0,
+        Some(false) => dx = 0.0,
+        None => {}
+    }
     let mut best: Option<(f64, (f64, f64))> = None;
     for (i, &r) in rects.iter().enumerate() {
         if i == cur {
@@ -588,6 +595,17 @@ mod tests {
         let g = [Rect::new(0, 0, 1000, 1000), Rect::new(1100, 0, 1000, 1000)];
         let q = wall_motion_in(&g, (990.0, 500.0), (1010.0, 500.0), 0);
         assert!(q.0 >= 1100.0, "{q:?}");
+    }
+
+    #[test]
+    fn bottom_edge_of_the_main_monitor_is_a_wall() {
+        // Nothing under the primary; the side ones reach lower. Down with a drift either way:
+        // stays on the primary's bottom row.
+        let r = [Rect::new(-983, -62, 983, 1747), Rect::new(0, 0, 3440, 1440), Rect::new(3440, 646, 1944, 820)];
+        for (from, to) in [((3000.0, 1430.0), (3010.0, 1460.0)), ((500.0, 1430.0), (490.0, 1460.0)), ((3436.0, 1435.0), (3439.0, 1460.0))] {
+            let p = wall_motion_in(&r, from, to, 0);
+            assert!(r[1].contains(p.0, p.1), "{from:?} -> {to:?} gave {p:?}");
+        }
     }
 
     #[test]
