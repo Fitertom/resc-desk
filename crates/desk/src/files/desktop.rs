@@ -68,7 +68,6 @@ impl App {
         vec![
             MItem::new("Вид", Act::None).g(G::View).sub(view),
             MItem::new("Сортировка", Act::None).g(G::Sort).sub(sort),
-            MItem::new("Обновить", Act::Refresh).hint("F5").g(G::Refresh),
             MItem::sep(),
             MItem::new("Вставить", Act::Paste).hint("Ctrl+V").g(G::Paste).on(self.clip.is_some()),
             MItem::new("Отменить", Act::Undo).hint("Ctrl+Z").on(!self.undo.is_empty()),

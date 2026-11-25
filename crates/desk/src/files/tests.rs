@@ -996,6 +996,7 @@ fn desktop_icons() {
     s.click_b(RIGHT, 900.0, 700.0, "right click the wallpaper");
     let m = s.app.menu.as_ref().unwrap_or_else(|| s.fail("no menu"));
     assert!(m.items.iter().any(|i| i.label == "Персонализация"));
+    assert!(!m.items.iter().any(|i| i.label == "Обновить"), "the desktop needs no «Обновить»");
     s.key(k::ESC);
     // New folder, named in place.
     s.key_m(k::N, true, true, false);

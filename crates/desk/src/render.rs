@@ -349,6 +349,32 @@ impl<'a> Canvas<'a> {
     }
 
     /// Ring (circle outline) centred at `c` in physical pixels.
+    /// An arc of a ring from angle `a0` to `a1` (radians, clockwise on screen, 0 = right),
+    /// with round ends.
+    pub fn arc(&mut self, clip: Rect, c: (f32, f32), radius: f32, width: f32, a0: f32, a1: f32, color: u32) {
+        let pad = (radius + width) as i32 + 2;
+        let bb = Rect::new(c.0 as i32 - pad, c.1 as i32 - pad, 2 * pad, 2 * pad).intersect(&clip).intersect(&self.bounds());
+        let tau = std::f32::consts::TAU;
+        let ends = [a0, a1].map(|a| (c.0 + radius * a.cos(), c.1 + radius * a.sin()));
+        for y in bb.y..bb.y1() {
+            for x in bb.x..bb.x1() {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let d = ((px - c.0).powi(2) + (py - c.1).powi(2)).sqrt();
+                let a = (py - c.1).atan2(px - c.0);
+                let rel = (a - a0).rem_euclid(tau);
+                let mut cov = if rel <= a1 - a0 { (width / 2.0 - (d - radius).abs() + 0.5).clamp(0.0, 1.0) } else { 0.0 };
+                for e in ends {
+                    let de = ((px - e.0).powi(2) + (py - e.1).powi(2)).sqrt();
+                    cov = cov.max((width / 2.0 - de + 0.5).clamp(0.0, 1.0));
+                }
+                if cov > 0.0 {
+                    let p = &mut self.px[y as usize * self.stride + x as usize];
+                    *p = blend(*p, fade(color, (cov * 255.0) as u32));
+                }
+            }
+        }
+    }
+
     pub fn ring(&mut self, clip: Rect, c: (f32, f32), radius: f32, width: f32, color: u32) {
         let pad = (radius + width) as i32 + 2;
         let bb = Rect::new(c.0 as i32 - pad, c.1 as i32 - pad, 2 * pad, 2 * pad).intersect(&clip).intersect(&self.bounds());

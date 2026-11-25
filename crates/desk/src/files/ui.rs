@@ -204,10 +204,15 @@ pub fn glyph(cv: &mut Canvas, clip: Rect, r: Rect, g: G, col: u32) {
             ln(cv, (0.0, -5.0), (4.0, -1.0));
         }
         G::Refresh => {
-            cv.ring(clip, (cx, cy), 5.0 * u, w, col);
-            // Gap and arrow head at the top right.
-            ln(cv, (2.0, -6.5), (5.0, -5.0));
-            ln(cv, (5.0, -5.0), (4.0, -1.8));
+            // An open circle, clockwise, the arrow head at the top pointing into the gap.
+            let r = 5.5;
+            let (a0, a1) = ((-25.0f32).to_radians(), 265.0f32.to_radians());
+            cv.arc(clip, (cx, cy), r * u, w, a0, a1, col);
+            let (ca, sa) = (a1.cos(), a1.sin());
+            let tip = (r * ca - sa * 1.2, r * sa + ca * 1.2);
+            let back = (tip.0 + sa * 3.6, tip.1 - ca * 3.6);
+            ln(cv, tip, (back.0 - ca * 3.2, back.1 - sa * 3.2));
+            ln(cv, tip, (back.0 + ca * 3.2, back.1 + sa * 3.2));
         }
         G::ChevR => {
             ln(cv, (-2.0, -4.0), (2.0, 0.0));
