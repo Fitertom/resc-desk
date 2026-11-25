@@ -202,7 +202,7 @@ pub fn toggle(d: &mut Desk) {
     }
     crate::shell::close_menus(d);
     d.overlay.switcher = None;
-    let oi = d.output_at(d.seat.x, d.seat.y).unwrap_or(0);
+    let oi = crate::shell::bar_output(d, d.output_at(d.seat.x, d.seat.y).unwrap_or(0));
     d.clip.open = Some(oi);
     d.clip.sel = 0;
     d.clip.top = 0;

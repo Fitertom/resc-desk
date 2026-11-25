@@ -82,6 +82,8 @@ enum Sw {
     MonOn,
     Vrr,
     Hdr,
+    /// The taskbar on every monitor.
+    TbAll,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -205,6 +207,7 @@ struct Model {
     mons: Vec<Mon>,
     /// Win+P's way (monitors::PROJECTS).
     project: usize,
+    taskbar_all: bool,
     error: Option<String>,
 }
 
@@ -247,6 +250,7 @@ fn fetch() -> Model {
             "renderer" => m.renderer = v.to_string(),
             "session" => m.session = v.to_string(),
             "project" => m.project = crate::monitors::PROJECTS.iter().position(|p| p.key() == v).unwrap_or(2),
+            "taskbar" => m.taskbar_all = v != "main",
             "mon" if n.len() >= 12 => m.mons.push(Mon {
                 name: n[0].to_string(),
                 on: n[1] == "1",
@@ -759,7 +763,7 @@ impl App {
         self.anims.drive(AK::Switch(Sw::Frost), on(self.m.frosted), SPR_SWITCH);
         self.anims.drive(AK::Switch(Sw::Glue), on(self.m.glue), SPR_SWITCH);
         let mon = self.sel_mon().cloned().unwrap_or_default();
-        for (sw, v) in [(Sw::Primary, mon.primary), (Sw::MonOn, mon.on), (Sw::Vrr, mon.vrr), (Sw::Hdr, mon.hdr)] {
+        for (sw, v) in [(Sw::Primary, mon.primary), (Sw::MonOn, mon.on), (Sw::Vrr, mon.vrr), (Sw::Hdr, mon.hdr), (Sw::TbAll, self.m.taskbar_all)] {
             self.anims.drive(AK::Switch(sw), on(v), SPR_SWITCH);
         }
         for (sw, input) in [(Sw::OutMute, false), (Sw::InMute, true)] {
@@ -917,6 +921,12 @@ impl App {
                 ));
                 if m.mons.len() > 1 {
                     v.push(("Несколько мониторов".into(), String::new(), "То же, что Win+P".into(), Ctl::Choice(Ch::Project)));
+                    v.push((
+                        "Панель задач на всех мониторах".into(),
+                        String::new(),
+                        "Выключите — панель задач, «Пуск» и значки в углу останутся только на основном мониторе, а окна займут другие мониторы целиком".into(),
+                        Ctl::Switch(Sw::TbAll),
+                    ));
                 }
                 let sel = self.sel_mon().cloned();
                 let out = sel.as_ref().and_then(|s| m.outputs.iter().find(|o| o.name == s.name));
@@ -1227,6 +1237,11 @@ impl App {
                         send(&format!("anim {} {i}", if ch == Ch::Launch { "launch" } else { "close" }));
                     }
                 }
+            }
+            Ctl::Switch(Sw::TbAll) => {
+                self.m.taskbar_all = !self.m.taskbar_all;
+                send(&format!("taskbar {}", if self.m.taskbar_all { "all" } else { "main" }));
+                self.refresh();
             }
             Ctl::Switch(sw @ (Sw::Primary | Sw::MonOn | Sw::Vrr | Sw::Hdr)) => {
                 let Some(m) = self.sel_mon().cloned() else { return };

@@ -276,6 +276,19 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             d.damage_all();
             crate::layout::save_config(d).map_err(|e| e.to_string())?;
         }
+        // taskbar all|main: on every monitor or the main one only
+        "taskbar" => {
+            d.display_cfg.taskbar_all = match arg(0)? {
+                "all" => true,
+                "main" => false,
+                _ => return Err("taskbar all|main".into()),
+            };
+            crate::shell::close_menus(d);
+            crate::tray::close(d);
+            crate::wm::outputs_changed(d);
+            d.damage_all();
+            crate::layout::save_config(d).map_err(|e| e.to_string())?;
+        }
         // project primary-only|duplicate|extend|second-only (Win+P)
         "project" => {
             let p = crate::monitors::Project::from_key(arg(0)?).ok_or("project primary-only|duplicate|extend|second-only")?;
@@ -350,6 +363,7 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             // Monitors: «mon NAME on W H MHZ ROT VRRCAP VRR HDRCAP HDR PRIMARY MIRROR», their modes.
             let main = d.outputs.get(crate::monitors::primary_index(d)).map(|o| o.name.clone());
             out.push_str(&format!("project {}\n", d.display_cfg.project.key()));
+            out.push_str(&format!("taskbar {}\n", if d.display_cfg.taskbar_all { "all" } else { "main" }));
             for m in b.monitors(d) {
                 out.push_str(&format!(
                     "mon {} {} {} {} {} {} {} {} {} {} {} {}\n",

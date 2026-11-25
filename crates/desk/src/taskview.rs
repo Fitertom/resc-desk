@@ -94,7 +94,7 @@ fn windows_of(d: &Desk, ws: u32) -> Vec<WKey> {
 
 fn lay(d: &Desk, tv: &TaskView) -> Lay {
     let o = d.outputs[tv.oi].rect();
-    let veil = Rect::new(o.x, o.y, o.w, o.h - shell::TASKBAR_H);
+    let veil = Rect::new(o.x, o.y, o.w, o.h - (o.y1() - crate::shell::taskbar_rect(d, tv.oi).y));
     // The desktops bar.
     let tile_h = TILE_W * o.h / o.w.max(1);
     let n = d.workspaces as i32 + 1;

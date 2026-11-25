@@ -38,6 +38,8 @@ pub struct DisplayConfig {
     pub mons: HashMap<String, crate::monitors::MonCfg>,
     pub primary: Option<String>,
     pub project: crate::monitors::Project,
+    /// The taskbar on every monitor (true) or on the main one only.
+    pub taskbar_all: bool,
 }
 
 /// Calibration mode state (Параметры → Мониторы → Калибровка).
@@ -68,6 +70,7 @@ pub fn load_config() -> DisplayConfig {
         mons: HashMap::new(),
         primary: None,
         project: Default::default(),
+        taskbar_all: true,
     };
     let Ok(text) = std::fs::read_to_string(config_path()) else { return c };
     for line in text.lines() {
@@ -88,6 +91,7 @@ pub fn load_config() -> DisplayConfig {
                 c.mons.insert(name.to_string(), crate::monitors::MonCfg::parse(rest));
             }
             ["primary", name] => c.primary = Some(name.to_string()),
+            ["taskbar", v] => c.taskbar_all = *v != "main",
             ["project", p] => c.project = crate::monitors::Project::from_key(p).unwrap_or_default(),
             ["glass_blur", v] => c.glass_blur = v.parse().unwrap_or(crate::glass::FROST).clamp(0.0, crate::glass::MAX_BLUR),
             // A glass place's dim, blur and edge (look.rs).
@@ -133,6 +137,7 @@ pub fn save_config(d: &Desk) -> std::io::Result<String> {
         s.push_str(&format!("primary {p}\n"));
     }
     s.push_str(&format!("project {}\n", d.display_cfg.project.key()));
+    s.push_str(&format!("taskbar {}\n", if d.display_cfg.taskbar_all { "all" } else { "main" }));
     let mut mons: Vec<_> = d.display_cfg.mons.iter().collect();
     mons.sort_by(|a, b| a.0.cmp(b.0));
     for (n, c) in mons {

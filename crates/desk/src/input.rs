@@ -629,7 +629,7 @@ fn snap_target(d: &Desk, x: f64, y: f64) -> Option<(Rect, SnapTo)> {
     let top = y <= o.y as f64 + 1.0 && outside(x, y - 2.0);
     let corner = 48.0;
     let near_top = y < o.y as f64 + corner;
-    let near_bottom = y > (o.y1() - shell::TASKBAR_H) as f64 - corner;
+    let near_bottom = y > (wm::workarea(d, oi).y1()) as f64 - corner;
     let wa = wm::workarea(d, oi);
     let (hw, hh) = (wa.w / 2, wa.h / 2);
     let t = if left {

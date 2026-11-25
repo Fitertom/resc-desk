@@ -370,7 +370,7 @@ pub fn toggle(d: &mut Desk) {
     }
     shell::close_menus(d);
     crate::tray::close(d);
-    let oi = d.output_at(d.seat.x, d.seat.y).unwrap_or(0);
+    let oi = shell::bar_output(d, d.output_at(d.seat.x, d.seat.y).unwrap_or(0));
     let cur = PROJECTS.iter().position(|p| *p == d.display_cfg.project).unwrap_or(2);
     d.mons.panel = Some((oi, cur));
     d.mons.hover = None;

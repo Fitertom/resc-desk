@@ -543,7 +543,7 @@ fn build_scene_m(d: &Desk, oi: usize, morphs: bool) -> Vec<Item> {
         }
     }
     // The taskbar hides under a fullscreen window on this output.
-    let tb_hidden = fullscreen_top.map_or(false, |k| d.windows[k].fullscreen_output == Some(oi));
+    let tb_hidden = fullscreen_top.map_or(false, |k| d.windows[k].fullscreen_output == Some(oi)) || !shell::has_taskbar(d, oi);
     if !tb_hidden {
         // The islands' glass shadow reaches above the strip: the item covers it too, or the
         // CPU path would cut the shadow off at the strip's top edge.
@@ -560,7 +560,14 @@ fn build_scene_m(d: &Desk, oi: usize, morphs: bool) -> Vec<Item> {
     if !cr.is_empty() {
         items.push(Item::new(cr, None, Elem::Cursor));
     }
-    items.retain(|i| i.rect.overlaps(&orect));
+    // A window flying into its button (or out of it) is drawn where it is now, which may be
+    // another monitor than the one it stands on: kept wherever its flight covers.
+    let flying: Vec<(WKey, Rect)> = if morphs {
+        d.windows.iter().filter(|(_, w)| w.morph.is_some()).filter_map(|(k, _)| crate::winanim::pose(d, k).map(|p| (k, p.bounds()))).collect()
+    } else {
+        Vec::new()
+    };
+    items.retain(|i| i.rect.overlaps(&orect) || i.win.map_or(false, |w| flying.iter().any(|(k, b)| *k == w && b.overlaps(&orect))));
     items
 }
 

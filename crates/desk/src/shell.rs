@@ -324,6 +324,10 @@ const CHIP: i32 = 32;
 
 pub fn taskbar_rect(d: &Desk, oi: usize) -> Rect {
     let r = d.outputs[oi].rect();
+    if !has_taskbar(d, oi) {
+        // None: an empty strip under the bottom edge (nothing hits or draws it).
+        return Rect::new(r.x, r.y1(), r.w, 0);
+    }
     Rect::new(r.x, r.y1() - TASKBAR_H, r.w, TASKBAR_H)
 }
 
@@ -372,8 +376,25 @@ pub fn taskbar_contains(d: &Desk, x: f64, y: f64) -> bool {
         || (crate::taskview::is_open(d) && d.output_at(x, y) == d.overlay.taskview.as_ref().map(|t| t.oi))
 }
 
+/// No taskbar on output `oi` now: a fullscreen window covers it, or the taskbar is on the
+/// main monitor only.
 fn fullscreen_on(d: &Desk, oi: usize) -> bool {
-    wm::visible_stack(d).iter().any(|k| d.windows[*k].tile == Tile::Fullscreen && d.windows[*k].fullscreen_output == Some(oi))
+    !has_taskbar(d, oi) || wm::visible_stack(d).iter().any(|k| d.windows[*k].tile == Tile::Fullscreen && d.windows[*k].fullscreen_output == Some(oi))
+}
+
+/// Output `oi` has a taskbar (Параметры → Мониторы: on every monitor, or the main one only).
+pub fn has_taskbar(d: &Desk, oi: usize) -> bool {
+    d.display_cfg.taskbar_all || oi == crate::monitors::primary_index(d)
+}
+
+/// Where what opens from the taskbar (Пуск, flyouts, Win+V, Win+P) goes for output `oi`:
+/// there if it has a taskbar, else the main monitor.
+pub fn bar_output(d: &Desk, oi: usize) -> usize {
+    if has_taskbar(d, oi) {
+        oi
+    } else {
+        crate::monitors::primary_index(d)
+    }
 }
 
 pub fn damage_taskbars(d: &mut Desk) {
@@ -386,7 +407,7 @@ pub fn damage_taskbars(d: &mut Desk) {
 
 /// Once a minute: only the clock island changes.
 pub fn damage_clocks(d: &mut Desk) {
-    for i in 0..d.outputs.len() {
+    for i in (0..d.outputs.len()).filter(|i| has_taskbar(d, *i)).collect::<Vec<_>>() {
         let r = islands(d, i)[1];
         d.damage(r.inflate(GLASS_REACH));
     }
@@ -1290,7 +1311,7 @@ pub fn tick(d: &mut Desk) -> bool {
 // ------------------------------------------------------------------ start menu
 
 pub fn toggle_start(d: &mut Desk) {
-    let oi = d.output_at(d.seat.x, d.seat.y).unwrap_or(0);
+    let oi = bar_output(d, d.output_at(d.seat.x, d.seat.y).unwrap_or(0));
     toggle_start_on(d, oi);
 }
 
