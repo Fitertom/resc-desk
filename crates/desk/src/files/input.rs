@@ -427,6 +427,13 @@ impl App {
                     self.scroll.to((self.scroll.target + 20.0).min(m));
                 }
             }
+            Hit::Head(i) if i > 0 && (far || pdrag) => {
+                // Dragging a header moves the column («Имя» stays first).
+                if let Some(p) = self.press.as_mut() {
+                    p.dragging = true;
+                }
+                self.col_drag = Some((i, x));
+            }
             Hit::HeadEdge(i) => {
                 if let Some((c, _)) = self.head_cols().get(i) {
                     let w = (col_w0 + dx as i32).max(50);
@@ -767,6 +774,11 @@ impl App {
                 let m = self.bg_menu();
                 self.open_menu(m, xi, yi);
             }
+            Hit::Head(i) | Hit::HeadEdge(i) => {
+                let at = if matches!(h, Hit::Head(_)) { Some(i) } else { None };
+                let m = self.head_menu(at);
+                self.open_menu(m, xi, yi);
+            }
             Hit::Tab(i) | Hit::TabClose(i) => {
                 let m = vec![
                     MItem::new("Новая вкладка", Act::NewTab).hint("Ctrl+T"),
@@ -807,6 +819,11 @@ impl App {
         self.spring_at = None;
         self.dirty = true;
         let h = self.hit(x, y);
+        if let Some((from, _)) = self.col_drag.take() {
+            let to = self.col_drop_at(from, x);
+            self.move_col(from, to);
+            return;
+        }
         if p.dragging {
             let Some((to, eff)) = self.drag_to.clone() else { return };
             if p.button == BTN_RIGHT {
@@ -892,7 +909,24 @@ impl App {
         self.ndrop.hide();
     }
 
-    fn autofit(&mut self, i: usize) {
+    /// Where header `from`, dragged to `x`, lands (a shown index, never 0 = «Имя»).
+    pub fn col_drop_at(&self, from: usize, x: f64) -> usize {
+        let cols = self.head_cols();
+        let mut to = cols.len().saturating_sub(1);
+        for (j, (_, r)) in cols.iter().enumerate() {
+            if x < (r.x + r.w / 2) as f64 {
+                to = j;
+                break;
+            }
+        }
+        // Past its own slot the others shift left by one.
+        if to > from && x < (cols[cols.len() - 1].1.x + cols[cols.len() - 1].1.w / 2) as f64 {
+            to -= 1;
+        }
+        to.max(1)
+    }
+
+    pub fn autofit(&mut self, i: usize) {
         let Some((c, _)) = self.head_cols().get(i).copied() else { return };
         let mut w = ui::tw(c.title(), 13.0) + 30;
         for it in &self.items {
@@ -1188,6 +1222,11 @@ impl App {
                 self.open_menu(menu, x, y);
             }
             k::ESC => {
+                // Esc drops a header being dragged where it was.
+                if self.col_drag.take().is_some() {
+                    self.press = None;
+                    return;
+                }
                 self.clip_cut_clear();
                 self.sel.iter_mut().for_each(|s| *s = false);
             }

@@ -154,6 +154,12 @@ impl Sim {
         if a.cur >= a.tabs.len() {
             self.fail("current tab past the end");
         }
+        if a.col_drag.is_some() && a.press.is_none() {
+            self.fail("a header drag with no button held");
+        }
+        if a.columns().first() != Some(&Col::Name) {
+            self.fail("«Имя» is not the first column");
+        }
         if a.menu.is_some() && a.dialog.is_some() {
             self.fail("a menu and a dialog at once");
         }
@@ -462,6 +468,85 @@ fn nothing_outside_is_started() {
     s.open("notes.md");
     let log = open::DRY_LOG.lock().unwrap().clone();
     assert!(log.iter().all(|l| l.starts_with("spawn") || l.starts_with("clip")), "{log:?}");
+}
+
+#[test]
+fn columns_hide_show_move() {
+    let mut s = Sim::new();
+    s.open("Документы");
+    let names = |s: &Sim| s.app.columns().iter().map(|c| c.title()).collect::<Vec<_>>();
+    assert_eq!(names(&s), ["Имя", "Дата изменения", "Тип", "Размер"]);
+    // Right click on «Тип»: the column list.
+    let r = s.app.head_cols()[2].1;
+    s.click_b(RIGHT, r.x as f64 + 20.0, r.y as f64 + 15.0, "right click «Тип»");
+    let m = s.app.menu.as_ref().unwrap_or_else(|| s.fail("no header menu"));
+    let i = m.items.iter().position(|it| it.label == "Тип").unwrap();
+    assert_eq!(m.items[i].check, Some(true));
+    let name = m.items.iter().position(|it| it.label == "Имя").unwrap();
+    assert!(!m.items[name].on, "«Имя» can't be hidden");
+    let r = s.app.menu.as_ref().unwrap().item_rect(i);
+    s.click(r, "uncheck «Тип»");
+    assert_eq!(names(&s), ["Имя", "Дата изменения", "Размер"]);
+    // Show «Права».
+    let r = s.app.head_cols()[1].1;
+    s.click_b(RIGHT, r.x as f64 + 20.0, r.y as f64 + 15.0, "right click header");
+    let i = s.app.menu.as_ref().unwrap().items.iter().position(|it| it.label == "Права").unwrap();
+    let r = s.app.menu.as_ref().unwrap().item_rect(i);
+    s.click(r, "check «Права»");
+    assert_eq!(names(&s), ["Имя", "Дата изменения", "Размер", "Права"]);
+    assert_eq!(draw::cell_text(&s.app, &s.app.items[s.item("notes.md")], Col::Perms), "rw-r--r--");
+    // Drag «Размер» before «Дата изменения».
+    let from = s.app.head_cols()[2].1;
+    let to = s.app.head_cols()[1].1;
+    let (y, x0, x1) = (from.y as f64 + 15.0, from.x as f64 + 30.0, to.x as f64 + 10.0);
+    s.log.push("drag «Размер» left".into());
+    s.app.motion(x0, y);
+    s.app.button(LEFT, true);
+    for t in 1..=6 {
+        s.app.motion(x0 + (x1 - x0) * t as f64 / 6.0, y);
+    }
+    s.check();
+    s.app.button(LEFT, false);
+    s.settle();
+    assert_eq!(names(&s), ["Имя", "Размер", "Дата изменения", "Права"]);
+    assert_eq!(s.app.view.sort, Col::Name, "a drag is not a click: no sorting");
+    // And to the very end.
+    let from = s.app.head_cols()[1].1;
+    let last = *s.app.head_cols().last().unwrap();
+    s.app.motion(from.x as f64 + 30.0, y);
+    s.app.button(LEFT, true);
+    for t in 1..=6 {
+        s.app.motion(from.x as f64 + 30.0 + (last.1.x1() as f64 + 40.0 - from.x as f64 - 30.0) * t as f64 / 6.0, y);
+    }
+    s.app.button(LEFT, false);
+    s.settle();
+    assert_eq!(names(&s), ["Имя", "Дата изменения", "Права", "Размер"]);
+    // «Имя» doesn't move.
+    let n = s.app.head_cols()[0].1;
+    s.app.motion(n.x as f64 + 60.0, y);
+    s.app.button(LEFT, true);
+    for t in 1..=6 {
+        s.app.motion(n.x as f64 + 60.0 + 100.0 * t as f64, y);
+    }
+    s.app.button(LEFT, false);
+    s.settle();
+    assert_eq!(names(&s)[0], "Имя");
+    // Esc while dragging puts it back.
+    let from = s.app.head_cols()[2].1;
+    s.app.motion(from.x as f64 + 30.0, y);
+    s.app.button(LEFT, true);
+    s.app.motion(from.x as f64 - 200.0, y);
+    s.key(k::ESC);
+    s.app.button(LEFT, false);
+    s.settle();
+    assert_eq!(names(&s), ["Имя", "Дата изменения", "Права", "Размер"]);
+    // Folders and the trash keep their own sets; defaults come back.
+    s.nav("Корзина");
+    assert_eq!(names(&s)[1], "Исходное расположение");
+    s.key_m(k::LEFT, false, false, true);
+    assert_eq!(names(&s), ["Имя", "Дата изменения", "Права", "Размер"]);
+    s.app.act(Act::ResetCols);
+    assert_eq!(names(&s), ["Имя", "Дата изменения", "Тип", "Размер"]);
 }
 
 // ------------------------------------------------------------------ history model

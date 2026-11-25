@@ -103,6 +103,8 @@ pub enum Col {
     Deleted,
     Packed,
     Folder,
+    Perms,
+    Owner,
 }
 
 impl Col {
@@ -116,6 +118,8 @@ impl Col {
             Col::Deleted => "Дата удаления",
             Col::Packed => "Сжатый",
             Col::Folder => "Папка",
+            Col::Perms => "Права",
+            Col::Owner => "Владелец",
         }
     }
     fn width(self) -> i32 {
@@ -125,6 +129,8 @@ impl Col {
             Col::Type => 170,
             Col::Size | Col::Packed => 100,
             Col::Orig | Col::Folder => 250,
+            Col::Perms => 110,
+            Col::Owner => 120,
         }
     }
     pub fn right(self) -> bool {
@@ -205,6 +211,10 @@ pub enum Act {
     SelInvert,
     Mode(Mode),
     Sort(Col),
+    ToggleCol(Col),
+    FitCol(usize),
+    FitCols,
+    ResetCols,
     Desc(bool),
     Group(Option<Col>),
     Hidden,
@@ -496,6 +506,10 @@ pub struct App {
     pub view: View,
     pub views: HashMap<String, View>,
     pub widths: HashMap<Col, i32>,
+    /// Column order and visibility per kind of place (see col_kind).
+    pub col_sets: HashMap<&'static str, Vec<(Col, bool)>>,
+    /// A header being dragged: (shown index, pointer x).
+    pub col_drag: Option<(usize, f64)>,
     pub show_hidden: bool,
     pub show_ext: bool,
     pub scroll: Spring,
@@ -670,7 +684,7 @@ fn date_bucket(t: i64) -> (u32, &'static str) {
 impl App {
     fn new(start: Loc, w: i32, h: i32) -> App {
         let mut widths = HashMap::new();
-        for c in [Col::Name, Col::Date, Col::Type, Col::Size, Col::Orig, Col::Deleted, Col::Packed, Col::Folder] {
+        for c in [Col::Name, Col::Date, Col::Type, Col::Size, Col::Orig, Col::Deleted, Col::Packed, Col::Folder, Col::Perms, Col::Owner] {
             widths.insert(c, c.width());
         }
         let mut a = App {
@@ -688,6 +702,8 @@ impl App {
             view: View::default(),
             views: HashMap::new(),
             widths,
+            col_sets: HashMap::new(),
+            col_drag: None,
             show_hidden: false,
             show_ext: true,
             scroll: Spring::new(0.0, 0.22, 1.0),
@@ -1010,6 +1026,9 @@ impl App {
     /// Shows `l` (already the tab's location): its view, list, selection.
     fn enter(&mut self, l: Loc, fresh_nav: bool) {
         self.stop_search();
+        if self.col_drag.take().is_some() {
+            self.press = None;
+        }
         // The search box belongs to where it was typed.
         if !matches!(l, Loc::Search(..)) {
             self.search.clear();
@@ -1258,13 +1277,80 @@ impl App {
         out
     }
 
-    pub fn columns(&self) -> Vec<Col> {
+    /// Which set of columns a place uses (folders, trash, archives, search results).
+    pub fn col_kind(&self) -> &'static str {
         match self.loc() {
-            Loc::Trash => vec![Col::Name, Col::Orig, Col::Deleted, Col::Size, Col::Type],
-            Loc::Arc(..) => vec![Col::Name, Col::Size, Col::Packed, Col::Date, Col::Type],
-            Loc::Search(..) => vec![Col::Name, Col::Date, Col::Type, Col::Size, Col::Folder],
-            _ => vec![Col::Name, Col::Date, Col::Type, Col::Size],
+            Loc::Trash => "trash",
+            Loc::Arc(..) => "arc",
+            Loc::Search(..) => "search",
+            _ => "dir",
         }
+    }
+
+    /// Every column this kind of place can show, in order, and whether it is shown.
+    pub fn col_set(&self) -> Vec<(Col, bool)> {
+        if let Some(v) = self.col_sets.get(self.col_kind()) {
+            return v.clone();
+        }
+        default_cols(self.col_kind())
+    }
+
+    /// The shown columns, in order; «Имя» always first.
+    pub fn columns(&self) -> Vec<Col> {
+        self.col_set().into_iter().filter(|c| c.1).map(|c| c.0).collect()
+    }
+
+    /// Shows or hides a column (not «Имя»).
+    pub fn toggle_col(&mut self, c: Col) {
+        if c == Col::Name {
+            return;
+        }
+        let mut v = self.col_set();
+        if let Some(e) = v.iter_mut().find(|e| e.0 == c) {
+            e.1 = !e.1;
+        }
+        self.col_sets.insert(self.col_kind(), v);
+        self.lay();
+    }
+
+    /// Moves shown column `from` to position `to` (both among the shown ones; 0 is «Имя»).
+    pub fn move_col(&mut self, from: usize, to: usize) {
+        let shown = self.columns();
+        if from == 0 || to == 0 || from >= shown.len() || to >= shown.len() || from == to {
+            return;
+        }
+        let mut order = shown.clone();
+        let c = order.remove(from);
+        order.insert(to, c);
+        // Hidden columns keep their place after the shown ones.
+        let mut v: Vec<(Col, bool)> = order.into_iter().map(|c| (c, true)).collect();
+        v.extend(self.col_set().into_iter().filter(|e| !e.1));
+        self.col_sets.insert(self.col_kind(), v);
+        self.lay();
+    }
+
+    pub fn reset_cols(&mut self) {
+        self.col_sets.remove(self.col_kind());
+        for c in [Col::Name, Col::Date, Col::Type, Col::Size, Col::Orig, Col::Deleted, Col::Packed, Col::Folder, Col::Perms, Col::Owner] {
+            self.widths.insert(c, c.width());
+        }
+        self.lay();
+    }
+
+    /// Right click on the header: the columns to show, as Windows has it.
+    pub fn head_menu(&self, at: Option<usize>) -> Vec<MItem> {
+        let mut v = Vec::new();
+        if let Some(i) = at {
+            v.push(MItem::new("Подогнать ширину столбца", Act::FitCol(i)));
+        }
+        v.push(MItem::new("Подогнать ширину всех столбцов", Act::FitCols));
+        v.push(MItem::sep());
+        for (c, on) in self.col_set() {
+            v.push(MItem::new(c.title(), Act::ToggleCol(c)).check(on).on(c != Col::Name));
+        }
+        v.push(MItem::sep());
+        v.push(MItem::new("Столбцы по умолчанию", Act::ResetCols).on(self.col_sets.contains_key(self.col_kind())));
+        v
     }
 
     fn cmp(&self, a: &Item, b: &Item, c: Col) -> std::cmp::Ordering {
@@ -1277,6 +1363,8 @@ impl App {
             Col::Deleted => a.deleted.cmp(&b.deleted),
             Col::Packed => a.packed.cmp(&b.packed),
             Col::Folder => model::natural(&a.folder, &b.folder),
+            Col::Perms => (a.e.mode & 0o7777).cmp(&(b.e.mode & 0o7777)),
+            Col::Owner => model::natural(&user_name(a.e.uid), &user_name(b.e.uid)),
         }
     }
 
@@ -2537,12 +2625,43 @@ pub fn unique(p: &Path) -> PathBuf {
     ops::free_name(p, false)
 }
 
-fn user_name(uid: u32) -> String {
+pub fn user_name(uid: u32) -> String {
+    thread_local! {
+        static USERS: std::cell::RefCell<HashMap<u32, String>> = std::cell::RefCell::new(HashMap::new());
+    }
+    if let Some(n) = USERS.with(|u| u.borrow().get(&uid).cloned()) {
+        return n;
+    }
     let t = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
-    t.lines().find_map(|l| {
+    let n = t.lines().find_map(|l| {
         let f: Vec<&str> = l.split(':').collect();
         (f.len() > 2 && f[2] == uid.to_string()).then(|| f[0].to_string())
-    }).unwrap_or_else(|| uid.to_string())
+    }).unwrap_or_else(|| uid.to_string());
+    USERS.with(|u| u.borrow_mut().insert(uid, n.clone()));
+    n
+}
+
+/// rwxr-xr-x
+pub fn perm_str(mode: u32) -> String {
+    let mut s = String::new();
+    for sh in [6, 3, 0] {
+        let b = (mode >> sh) & 7;
+        s.push(if b & 4 != 0 { 'r' } else { '-' });
+        s.push(if b & 2 != 0 { 'w' } else { '-' });
+        s.push(if b & 1 != 0 { 'x' } else { '-' });
+    }
+    s
+}
+
+/// The columns a kind of place starts with (shown ones first).
+fn default_cols(kind: &str) -> Vec<(Col, bool)> {
+    let (on, off): (&[Col], &[Col]) = match kind {
+        "trash" => (&[Col::Name, Col::Orig, Col::Deleted, Col::Size, Col::Type], &[Col::Date]),
+        "arc" => (&[Col::Name, Col::Size, Col::Packed, Col::Date, Col::Type], &[]),
+        "search" => (&[Col::Name, Col::Date, Col::Type, Col::Size, Col::Folder], &[Col::Perms, Col::Owner]),
+        _ => (&[Col::Name, Col::Date, Col::Type, Col::Size], &[Col::Perms, Col::Owner]),
+    };
+    on.iter().map(|c| (*c, true)).chain(off.iter().map(|c| (*c, false))).collect()
 }
 
 fn measure_all(p: &Path) -> (u64, u64) {
@@ -3020,6 +3139,14 @@ impl App {
                 self.sel.iter_mut().for_each(|s| *s = !*s);
             }
             Act::Mode(m) => self.set_mode(m),
+            Act::ToggleCol(c) => self.toggle_col(c),
+            Act::FitCol(i) => self.autofit(i),
+            Act::FitCols => {
+                for i in 0..self.columns().len() {
+                    self.autofit(i);
+                }
+            }
+            Act::ResetCols => self.reset_cols(),
             Act::Sort(c) => {
                 if self.view.sort == c {
                     self.view.desc = !self.view.desc;

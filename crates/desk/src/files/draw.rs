@@ -329,6 +329,8 @@ pub fn cell_text(app: &App, it: &Item, c: Col) -> String {
         Col::Deleted => if it.deleted > 0 { model::date(it.deleted) } else { String::new() },
         Col::Packed => if it.e.dir || it.packed == 0 { String::new() } else { model::size_kb(it.packed) },
         Col::Folder => it.folder.clone(),
+        Col::Perms => if it.e.mode == 0 { String::new() } else { super::perm_str(it.e.mode) },
+        Col::Owner => if it.e.mode == 0 { String::new() } else { super::user_name(it.e.uid) },
     }
 }
 
@@ -357,6 +359,20 @@ fn header(app: &App, cv: &mut Canvas) {
         cv.fill(clip, Rect::new(r.x1() - 1, r.y + 8, 1, r.h - 16), white(if hov(app, Hit::HeadEdge(i)) { 90 } else { 22 }));
     }
     cv.fill(clip, Rect::new(vr.x, TOP + HEAD_H - 1, vr.w, 1), white(14));
+    // A header being dragged: where it would land, and the header under the pointer.
+    if let Some((from, x)) = app.col_drag {
+        let cols = app.head_cols();
+        if let Some((c, r)) = cols.get(from).copied() {
+            let to = app.col_drop_at(from, x);
+            let lx = if to < from { cols[to].1.x } else { cols[to].1.x1() };
+            cv.fill(clip, Rect::new(lx - 1, TOP + 4, 3, HEAD_H - 8), ui::accent(255));
+            let g = Rect::new(x as i32 - r.w / 2, r.y + 2, r.w, r.h - 4);
+            cv.rrect(clip, g, 6, BG_BODY);
+            cv.rrect(clip, g, 6, ui::accent(60));
+            cv.rrect_stroke(clip, g, 6, 1.0, ui::ACCENT_RGB.0 << 16 | ui::ACCENT_RGB.1 << 8 | ui::ACCENT_RGB.2, 200, 200);
+            text(cv, clip, g.x + 10, r.y + 21, c.title(), 12.5, FG, g.w - 20);
+        }
+    }
 }
 
 fn content(app: &App, cv: &mut Canvas) {
