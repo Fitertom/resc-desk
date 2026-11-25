@@ -34,8 +34,13 @@ const REL_WHEEL_HI_RES: u16 = 11;
 const REL_HWHEEL_HI_RES: u16 = 12;
 const ABS_X: u16 = 0;
 const ABS_Y: u16 = 1;
-const KEY_A: usize = 30;
-const KEY_Z: usize = 44;
+/// The letter rows' key codes (Q…P, A…L, Z…M): a real keyboard has them all. The codes in
+/// between (Shift, Enter, punctuation) say nothing: KEY_A..=KEY_Z taken as a range wanted
+/// Left Shift (42) too.
+const LETTERS: [std::ops::RangeInclusive<usize>; 3] = [16..=25, 30..=38, 44..=50];
+/// Mute, volume down, volume up: a keyboard's media interface (a volume knob) is a keyboard
+/// of its own to the kernel, without letters.
+const MEDIA_KEYS: [usize; 3] = [113, 114, 115];
 const BTN_MISC: u16 = 0x100;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
@@ -228,7 +233,9 @@ fn open_dev(path: &str) -> Option<Dev> {
     let name = String::from_utf8_lossy(&name[..name.iter().position(|b| *b == 0).unwrap_or(0)]).into_owned();
     let has = |bits: &[u8], n: u16| test_bit(bits, n as usize);
     let mut kinds = Vec::new();
-    if has(&types, EV_KEY) && (KEY_A..=KEY_Z).all(|k| test_bit(&keys, k)) {
+    let letters = LETTERS.iter().all(|r| r.clone().all(|k| test_bit(&keys, k)));
+    let media = MEDIA_KEYS.iter().any(|k| test_bit(&keys, *k));
+    if has(&types, EV_KEY) && (letters || media) {
         kinds.push(Kind::Keyboard);
     }
     if has(&types, EV_REL) && has(&rels, REL_X) && has(&rels, REL_Y) && has(&keys, BTN_LEFT) {
