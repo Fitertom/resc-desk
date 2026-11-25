@@ -420,6 +420,7 @@ pub fn glass_panels(d: &Desk, oi: usize) -> Vec<(Rect, i32, usize)> {
     }
     v.extend(crate::tray::glass(d, oi).map(|r| (r, crate::tray::FLY_R, 2)));
     v.extend(crate::clipboard::glass_rect(d, oi).map(|r| (r, crate::clipboard::RADIUS, 2)));
+    v.extend(crate::monitors::glass_rect(d, oi).map(|r| (r, 20, 2)));
     // (On the GPU path Alt+Tab is drops of its own, alttab.rs.)
     if let Some((list, _)) = d.overlay.switcher.as_ref().filter(|_| d.overlay.alttab.is_none()) {
         if d.output_at(d.seat.x, d.seat.y).unwrap_or(0) == oi {
@@ -1127,6 +1128,7 @@ pub fn pointer_hover(d: &mut Desk) {
     crate::tray::hover(d, x, y);
     crate::taskview::hover(d, x, y);
     crate::clipboard::hover(d, x, y);
+    crate::monitors::hover(d, x, y);
     crate::start::hover(d, x, y);
 }
 
@@ -1379,6 +1381,9 @@ pub fn menu_key(d: &mut Desk, code: u32, pressed: bool) -> bool {
     if crate::clipboard::key(d, code, pressed) {
         return true;
     }
+    if crate::monitors::key(d, code, pressed) {
+        return true;
+    }
     if crate::tray::wants_keys(d) && crate::tray::key(d, code, pressed) {
         return true;
     }
@@ -1482,7 +1487,7 @@ fn draw_switcher(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
         let tile = cell.inflate(3);
         cv.rrect(clip, xf.r(tile), xf.len(14), if i == *sel { argb(30, 255, 255, 255) } else { argb(12, 255, 255, 255) });
         if i == *sel {
-            cv.rrect_stroke(clip, xf.r(tile), xf.len(14), 2.0 * xf.scale as f32, (crate::look::accent() & 0xff_ffff), 255, 255);
+            cv.rrect_stroke(clip, xf.r(tile), xf.len(14), 2.0 * xf.scale as f32, crate::look::accent() & 0xff_ffff, 255, 255);
         }
         let t = if w.title.is_empty() { &w.app_id } else { &w.title };
         draw_app_tile(cv, clip, xf, Rect::new(cell.x + 6, cell.y + 5, 18, 18), &w.app_id, &w.title);
@@ -1615,7 +1620,7 @@ pub fn draw_overlays(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
     if let Some(r) = d.overlay.snap_preview {
         if r.overlaps(&d.outputs[oi].rect()) {
             cv.rrect(clip, xf.r(r), xf.len(14), crate::look::accent_a(46));
-            cv.rrect_stroke(clip, xf.r(r), xf.len(14), 1.5 * xf.scale as f32, (crate::look::accent() & 0xff_ffff), 200, 140);
+            cv.rrect_stroke(clip, xf.r(r), xf.len(14), 1.5 * xf.scale as f32, crate::look::accent() & 0xff_ffff, 200, 140);
         }
     }
     if glass_on_gpu() {
@@ -1631,6 +1636,7 @@ pub fn draw_overlays(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
     if d.clip.open == Some(oi) {
         crate::clipboard::draw(d, oi, xf, cv, clip);
     }
+    crate::monitors::draw(d, oi, xf, cv, clip);
     if d.overlay.switcher.is_some() && d.overlay.alttab.is_none() {
         let pointer_out = d.output_at(d.seat.x, d.seat.y).unwrap_or(0);
         if pointer_out == oi {
@@ -1654,6 +1660,9 @@ pub fn overlay_click(d: &mut Desk, x: f64, y: f64, button: u32) -> bool {
         return true;
     }
     if crate::clipboard::click(d, x, y) {
+        return true;
+    }
+    if crate::monitors::click(d, x, y) {
         return true;
     }
     if crate::taskview::click(d, x, y, button) {

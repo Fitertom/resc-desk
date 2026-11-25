@@ -115,6 +115,8 @@ pub struct Desk {
     pub shot_crop: Option<Rect>,
     pub wall: crate::wallpaper::Wall,
     pub clip: crate::clipboard::Clip,
+    /// Monitors: the Win+P panel, a reconfiguration to do (monitors.rs).
+    pub mons: crate::monitors::State,
     /// Vulkan renderer; None: the CPU draws everything (gpu.rs `init`).
     pub gpu: Option<Box<crate::gpu::Gpu>>,
     /// X programs through Xwayland (xwm.rs); None when Xwayland is not installed or off.
@@ -264,7 +266,11 @@ impl Desk {
     pub fn add_output(&mut self, name: String, pw: i32, ph: i32, spec: &crate::backend::OutSpec, refresh_mhz: i32) -> usize {
         let id = self.next_output_id;
         self.next_output_id += 1;
-        let plane = crate::layout::initial_plane(self, &name, pw, ph, spec.mm, spec.scale, spec.pos_mm);
+        let mut plane = crate::layout::initial_plane(self, &name, pw, ph, spec.mm, spec.scale, spec.pos_mm);
+        // Remembered upright, back turned (or the other way round): the plane turns too.
+        if (pw > ph) != (plane[2] > plane[3]) && pw != ph {
+            plane.swap(2, 3);
+        }
         let mut o = Output {
             id,
             name,
@@ -300,6 +306,8 @@ impl Desk {
 
     pub fn remove_output(&mut self, idx: usize) {
         let o = self.outputs.remove(idx);
+        // Its place stays for when it comes back (Win+P, switched on again, plugged in).
+        self.display_cfg.planes.insert(o.name.clone(), o.plane);
         self.remove_global(o.global);
         for (_, w) in self.windows.iter_mut() {
             if w.output > idx {
@@ -313,6 +321,21 @@ impl Desk {
             c.backup = self.outputs.iter().map(|o| o.plane).collect();
         }
         crate::layout::relayout(self);
+        crate::wm::outputs_changed(self);
+    }
+
+    /// A monitor turned (`swap`: by 90°, its plane's width and height trade places) and/or
+    /// given a new mode: the output becomes `pw`×`ph`. The monitor is the same size on the
+    /// desk, so its plane stays (its pixels get bigger or smaller).
+    pub fn reshape_output(&mut self, idx: usize, pw: i32, ph: i32, swap: bool) {
+        let o = &mut self.outputs[idx];
+        if swap {
+            o.plane.swap(2, 3);
+        }
+        o.pw = pw;
+        o.ph = ph;
+        crate::layout::relayout(self);
+        crate::layout::broadcast_output(self, idx);
         crate::wm::outputs_changed(self);
     }
 

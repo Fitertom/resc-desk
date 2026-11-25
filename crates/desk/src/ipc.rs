@@ -245,6 +245,63 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             d.damage_all();
             crate::layout::save_config(d).map_err(|e| e.to_string())?;
         }
+        // monitor NAME on|off | mode WxH@HZ|auto | rot 0|90|180|270 | vrr on|off | hdr on|off
+        "monitor" => {
+            let usage = "monitor NAME on|off | mode WxH@HZ|auto | rot 0|90|180|270 | vrr on|off | hdr on|off";
+            let name = arg(0)?.to_string();
+            let mut c = d.display_cfg.mons.get(&name).cloned().unwrap_or_default();
+            let on = |v: Option<&&str>| matches!(v.copied(), Some("on") | Some("1"));
+            match rest.get(1).copied() {
+                Some("on") => c.off = false,
+                Some("off") => c.off = true,
+                Some("mode") => c.mode = match rest.get(2).copied() {
+                    Some("auto") => None,
+                    Some(m) => Some(crate::monitors::parse_mode(m).ok_or(usage)?),
+                    None => return Err(usage.into()),
+                },
+                Some("rot") => c.rot = rest.get(2).and_then(|r| r.parse::<u16>().ok()).filter(|r| [0, 90, 180, 270].contains(r)).ok_or(usage)?,
+                Some("vrr") => c.vrr = on(rest.get(2)),
+                Some("hdr") => c.hdr = on(rest.get(2)),
+                _ => return Err(usage.into()),
+            }
+            d.display_cfg.mons.insert(name, c);
+            b.reconfigure(d);
+            d.damage_all();
+            crate::layout::save_config(d).map_err(|e| e.to_string())?;
+        }
+        "primary" => {
+            d.display_cfg.primary = Some(arg(0)?.to_string());
+            crate::layout::relayout(d);
+            b.reconfigure(d);
+            d.damage_all();
+            crate::layout::save_config(d).map_err(|e| e.to_string())?;
+        }
+        // project primary-only|duplicate|extend|second-only (Win+P)
+        "project" => {
+            let p = crate::monitors::Project::from_key(arg(0)?).ok_or("project primary-only|duplicate|extend|second-only")?;
+            d.display_cfg.project = p;
+            b.reconfigure(d);
+            d.damage_all();
+            crate::layout::save_config(d).map_err(|e| e.to_string())?;
+        }
+        "monitors" => {
+            for m in b.monitors(d) {
+                out.push_str(&format!(
+                    "{} {} {}x{}@{:.2} rot {} vrr {}/{} hdr {}/{}{}\n",
+                    m.name,
+                    if m.on { "on" } else { "off" },
+                    m.cur.0,
+                    m.cur.1,
+                    m.cur.2 as f64 / 1000.0,
+                    m.rot,
+                    m.vrr as u8,
+                    m.vrr_cap as u8,
+                    m.hdr as u8,
+                    m.hdr_cap as u8,
+                    m.mirror.map_or(String::new(), |s| format!(" mirror of {s}"))
+                ));
+            }
+        }
         // glass-place PLACE DIM BLUR BEZEL: one glass place's look (look.rs).
         "glass-place" => {
             let usage = "glass-place files|settings|calendar|timer|windows DIM(0..1) BLUR(px) BEZEL(px)";
@@ -290,6 +347,29 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
 ", crate::glass::bezel(), crate::glass::win_bezel(), crate::glass::MAX_BEZEL));
             out.push_str(&format!("anim {} {}\n", d.display_cfg.anim_launch, d.display_cfg.anim_close));
             out.push_str(&format!("accent {:06x}\n", crate::look::accent() & 0xff_ffff));
+            // Monitors: «mon NAME on W H MHZ ROT VRRCAP VRR HDRCAP HDR PRIMARY MIRROR», their modes.
+            let main = d.outputs.get(crate::monitors::primary_index(d)).map(|o| o.name.clone());
+            out.push_str(&format!("project {}\n", d.display_cfg.project.key()));
+            for m in b.monitors(d) {
+                out.push_str(&format!(
+                    "mon {} {} {} {} {} {} {} {} {} {} {} {}\n",
+                    m.name,
+                    m.on as u8,
+                    m.cur.0,
+                    m.cur.1,
+                    m.cur.2,
+                    m.rot,
+                    m.vrr_cap as u8,
+                    m.vrr as u8,
+                    m.hdr_cap as u8,
+                    m.hdr as u8,
+                    (main.as_deref() == Some(m.name.as_str())) as u8,
+                    m.mirror.as_deref().unwrap_or("-")
+                ));
+                for (w, h, r) in &m.modes {
+                    out.push_str(&format!("mode {} {w} {h} {r}\n", m.name));
+                }
+            }
             for p in crate::look::PLACES {
                 let g = crate::look::glass(p);
                 out.push_str(&format!("place {} {} {} {}\n", p.key(), g.dim, g.blur, g.bezel));

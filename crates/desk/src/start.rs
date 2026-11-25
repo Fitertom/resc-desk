@@ -277,7 +277,7 @@ fn draw_cell(d: &Desk, cv: &mut Canvas, clip: Rect, xf: Xf, cell: Rect, app: usi
         cv.rrect(clip, xf.r(cell.inflate(-3)), xf.len(12), argb(22, 255, 255, 255));
     }
     if sel {
-        cv.rrect_stroke(clip, xf.r(cell.inflate(-3)), xf.len(12), 1.5 * sc, (crate::look::accent() & 0xff_ffff), 200, 200);
+        cv.rrect_stroke(clip, xf.r(cell.inflate(-3)), xf.len(12), 1.5 * sc, crate::look::accent() & 0xff_ffff, 200, 200);
     }
     let a = &d.apps[app];
     let icon = Rect::new(cell.x + (cell.w - 40) / 2, cell.y + 10, 40, 40);
@@ -453,7 +453,7 @@ pub fn draw_content(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
                         cv.rrect(clip, xf.r(*cell), xf.len(12), argb(22, 255, 255, 255));
                     }
                     if sel_item == Some(i) {
-                        cv.rrect_stroke(clip, xf.r(*cell), xf.len(12), 1.5 * sc, (crate::look::accent() & 0xff_ffff), 200, 200);
+                        cv.rrect_stroke(clip, xf.r(*cell), xf.len(12), 1.5 * sc, crate::look::accent() & 0xff_ffff, 200, 200);
                     }
                     let app = &d.apps[*a];
                     let ic = Rect::new(cell.x + 10, cell.y + 7, 34, 34);

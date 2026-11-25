@@ -974,7 +974,7 @@ fn draw_net(d: &Desk, l: &Lay, xf: Xf, cv: &mut Canvas, clip: Rect) {
             }
             Hot::PwField => {
                 cv.rrect(clip, xf.r(r), xf.len(10), argb(22, 255, 255, 255));
-                cv.rrect_stroke(clip, xf.r(r), xf.len(10), 1.5 * xf.scale as f32, (crate::look::accent() & 0xff_ffff), 200, 200);
+                cv.rrect_stroke(clip, xf.r(r), xf.len(10), 1.5 * xf.scale as f32, crate::look::accent() & 0xff_ffff, 200, 200);
                 let n = d.tray.pw.text().chars().count();
                 if n == 0 {
                     font::draw_text(cv, clip, xf, r.x + 12, r.y + 22, "Пароль", 13.0, col::TEXT_DIM, r.w - 20);

@@ -5,7 +5,7 @@
 //! Start it from a text console (log in on Ctrl+Alt+F3, or have the console log in by
 //! itself, README) with `resc-desk`. The card and the input devices are the console user's
 //! through logind's ACLs on systemd distributions; otherwise the `video` and `input` groups.
-use super::drm::{self, Drm};
+use super::drm::Drm;
 use super::evdev::{Action, Input, SLOT_BASE};
 use super::vt::Vt;
 use super::Backend;
@@ -50,11 +50,8 @@ impl Kms {
                 None
             }
         };
-        let path = drm.path.clone();
-        for i in 0..drm.mons.len() {
-            let id = drm::add_output(d, &drm.mons[i], &path);
-            drm.mons[i].out_id = id;
-        }
+        // Each monitor's settings and Win+P's way: the outputs.
+        drm.apply(d);
         let mut input = Input::new();
         if input.scan(d) == 0 && std::env::var("RESC_ALLOW_NO_INPUT").is_err() {
             // Without a keyboard nothing could ever take the screen back: give it back now
@@ -157,5 +154,15 @@ impl Backend for Kms {
 
     fn name(&self) -> &'static str {
         "kms"
+    }
+
+    fn monitors(&self, _d: &Desk) -> Vec<crate::monitors::MonInfo> {
+        self.drm.info()
+    }
+
+    fn reconfigure(&mut self, d: &mut Desk) {
+        if !self.drm.paused {
+            self.drm.apply(d);
+        }
     }
 }

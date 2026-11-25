@@ -270,6 +270,7 @@ pub fn toplevel_commit(d: &mut Desk, wk: WKey, old_frame: Option<Rect>) {
         if d.windows[wk].desktop() {
             d.windows[wk].ssd = false;
             d.windows[wk].tile = Tile::Maximized;
+            d.windows[wk].output = crate::monitors::primary_index(d);
         }
         match d.windows[wk].tile {
             Tile::Maximized => {
@@ -550,6 +551,9 @@ fn save_restore(d: &mut Desk, wk: WKey) {
 }
 
 fn window_output(d: &Desk, wk: WKey) -> usize {
+    if d.windows[wk].desktop() {
+        return crate::monitors::primary_index(d);
+    }
     frame_rect(d, wk).map(|r| d.output_for_rect(&r)).unwrap_or(0)
 }
 
@@ -868,7 +872,8 @@ pub fn outputs_changed(d: &mut Desk) {
         if !d.surfaces.get(d.windows[wk].surf).map_or(false, |s| s.mapped) {
             continue;
         }
-        let oi = d.windows[wk].output.min(d.outputs.len() - 1);
+        // The desktop's icons live on the main monitor, as in Windows.
+        let oi = if d.windows[wk].desktop() { crate::monitors::primary_index(d) } else { d.windows[wk].output.min(d.outputs.len() - 1) };
         d.windows[wk].output = oi;
         match d.windows[wk].tile {
             Tile::Maximized => {

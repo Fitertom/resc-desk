@@ -892,7 +892,7 @@ pub fn draw(d: &Desk, p: Rect, f: Fly, hot: Option<CHot>, xf: Xf, cv: &mut Canva
             cv.rrect(clip, xf.r(disc), xf.len(17), argb(26, 255, 255, 255));
         }
         if c.edit.as_ref().map(|e| e.0) == Some(n) {
-            cv.rrect_stroke(clip, xf.r(disc), xf.len(17), 1.5 * s, (crate::look::accent() & 0xff_ffff), 255, 255);
+            cv.rrect_stroke(clip, xf.r(disc), xf.len(17), 1.5 * s, crate::look::accent() & 0xff_ffff, 255, 255);
         }
         if n == today_n {
             cv.rrect(clip, xf.r(disc), xf.len(17), col::accent());
@@ -922,7 +922,7 @@ pub fn draw(d: &Desk, p: Rect, f: Fly, hot: Option<CHot>, xf: Xf, cv: &mut Canva
     if let Some((n, f)) = &c.edit {
         let r = rect_of(CHot::Note).unwrap_or(Rect::new(p.x + PAD, ny + 2, p.w - 2 * PAD, 34));
         cv.rrect(clip, xf.r(r), xf.len(10), argb(22, 255, 255, 255));
-        cv.rrect_stroke(clip, xf.r(r), xf.len(10), 1.5 * s, (crate::look::accent() & 0xff_ffff), 200, 200);
+        cv.rrect_stroke(clip, xf.r(r), xf.len(10), 1.5 * s, crate::look::accent() & 0xff_ffff, 200, 200);
         if f.is_empty() {
             let ph = format!("Заметка на {}", day_name(*n));
             font::draw_text(cv, clip, xf, r.x + 12, r.y + 22, &ph, 13.0, col::TEXT_DIM, r.w - 24);
@@ -1057,7 +1057,7 @@ fn draw_timer(d: &Desk, p: Rect, hits: &[(CHot, Rect)], hot: Option<CHot>, xf: X
         let sel = c.tab == Tab::Timer && c.ring.is_none() && TIMER_PRESETS.get(k).map_or(false, |m| m * 60 == c.timer_s);
         cv.rrect(clip, xf.r(r), xf.len(15), argb(if hov(CHot::Chip(k as u8)) { 38 } else { 18 }, 255, 255, 255));
         if sel {
-            cv.rrect_stroke(clip, xf.r(r), xf.len(15), 1.5 * s, (crate::look::accent() & 0xff_ffff), 220, 220);
+            cv.rrect_stroke(clip, xf.r(r), xf.len(15), 1.5 * s, crate::look::accent() & 0xff_ffff, 220, 220);
         }
         let tw = font::text_width_w(label, 12.0, font::W::Semi);
         font::draw_text_w(cv, clip, xf, r.x + (r.w - tw) / 2, r.y + 19, label, 12.0, col::TEXT, r.w, font::W::Semi);

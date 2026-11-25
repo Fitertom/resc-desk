@@ -34,9 +34,13 @@ pub struct DisplayConfig {
     /// 0 into the button, 1 evaporates, 2 into the ✕.
     pub anim_launch: u8,
     pub anim_close: u8,
+    /// Each monitor's own settings (monitors.rs), the main one and Win+P's way.
+    pub mons: HashMap<String, crate::monitors::MonCfg>,
+    pub primary: Option<String>,
+    pub project: crate::monitors::Project,
 }
 
-/// Calibration mode state (Win+P).
+/// Calibration mode state (Параметры → Мониторы → Калибровка).
 pub struct Calib {
     pub sel: usize,
     pub backup: Vec<[f64; 4]>,
@@ -61,6 +65,9 @@ pub fn load_config() -> DisplayConfig {
         glass_win_bezel: crate::glass::WIN_BEZEL,
         anim_launch: 0,
         anim_close: 0,
+        mons: HashMap::new(),
+        primary: None,
+        project: Default::default(),
     };
     let Ok(text) = std::fs::read_to_string(config_path()) else { return c };
     for line in text.lines() {
@@ -77,6 +84,11 @@ pub fn load_config() -> DisplayConfig {
             ["glass_bezel", v] => c.glass_bezel = v.parse().unwrap_or(crate::glass::BEZEL).clamp(0.0, crate::glass::MAX_BEZEL),
             ["anim_launch", v] => c.anim_launch = v.parse::<u8>().unwrap_or(0).min(1),
             ["anim_close", v] => c.anim_close = v.parse::<u8>().unwrap_or(0).min(2),
+            ["monitor", name, rest @ ..] => {
+                c.mons.insert(name.to_string(), crate::monitors::MonCfg::parse(rest));
+            }
+            ["primary", name] => c.primary = Some(name.to_string()),
+            ["project", p] => c.project = crate::monitors::Project::from_key(p).unwrap_or_default(),
             ["glass_blur", v] => c.glass_blur = v.parse().unwrap_or(crate::glass::FROST).clamp(0.0, crate::glass::MAX_BLUR),
             // A glass place's dim, blur and edge (look.rs).
             ["glass_place", k, dim, blur, bezel] => {
@@ -117,6 +129,16 @@ pub fn save_config(d: &Desk) -> std::io::Result<String> {
     }
     s.push_str(&format!("anim_launch {}\n", d.display_cfg.anim_launch));
     s.push_str(&format!("anim_close {}\n", d.display_cfg.anim_close));
+    if let Some(p) = &d.display_cfg.primary {
+        s.push_str(&format!("primary {p}\n"));
+    }
+    s.push_str(&format!("project {}\n", d.display_cfg.project.key()));
+    let mut mons: Vec<_> = d.display_cfg.mons.iter().collect();
+    mons.sort_by(|a, b| a.0.cmp(b.0));
+    for (n, c) in mons {
+        s.push_str(&c.to_line(n));
+        s.push('\n');
+    }
     // Keep entries of monitors that are not connected right now.
     let mut all = d.display_cfg.planes.clone();
     for o in &d.outputs {
@@ -151,9 +173,10 @@ pub fn initial_plane(d: &Desk, name: &str, pw: i32, ph: i32, mm: Option<(f64, f6
 }
 
 /// Recomputes every output's logical position and scale from the plane.
-/// The first output is the reference: its scale is `ui_scale` and it sits at (0,0).
+/// The main monitor is the reference: its scale is `ui_scale` and it sits at (0,0).
 pub fn relayout(d: &mut Desk) {
-    let Some(p0) = d.outputs.first().map(|o| (o.plane, o.pw)) else { return };
+    let main = crate::monitors::primary_index(d);
+    let Some(p0) = d.outputs.get(main).map(|o| (o.plane, o.pw)) else { return };
     let (plane0, pw0) = p0;
     // Glue: shift every monitor left by the horizontal gaps before it.
     let shifts = glue_shifts(&d.outputs.iter().map(|o| o.plane).collect::<Vec<_>>(), d.display_cfg.glue);
@@ -162,7 +185,7 @@ pub fn relayout(d: &mut Desk) {
     }
     let k = (pw0 as f64 / plane0[2]) / d.display_cfg.ui_scale.max(0.25);
     d.mm_k = k;
-    d.mm_origin = (plane0[0] - shifts[0], plane0[1]);
+    d.mm_origin = (plane0[0] - shifts[main], plane0[1]);
     let ox = d.mm_origin.0;
     let mut changed = Vec::new();
     for (i, o) in d.outputs.iter_mut().enumerate() {

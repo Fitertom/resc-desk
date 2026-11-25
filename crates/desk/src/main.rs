@@ -21,6 +21,7 @@ mod ipc;
 mod jpeg;
 mod layout;
 mod look;
+mod monitors;
 mod net;
 mod png;
 mod pulse;
@@ -226,6 +227,7 @@ fn main() {
         shot_crop: None,
         wall: Default::default(),
         clip: Default::default(),
+        mons: Default::default(),
         gpu: None,
         xwm: None,
         x_receives: vec![],
@@ -269,7 +271,7 @@ fn main() {
     }
     d.gpu = gpu::init();
     dmabuf::init(&mut d);
-    if let Some((x, y)) = d.outputs.first().map(|o| o.rect().center()) {
+    if let Some((x, y)) = d.outputs.get(monitors::primary_index(&d)).map(|o| o.rect().center()) {
         d.seat.x = x as f64;
         d.seat.y = y as f64;
     }
@@ -362,6 +364,13 @@ fn main() {
             }
         }
         d.flush_clients();
+        // Monitor settings changed (Win+P, the settings app): the backend applies them.
+        if d.mons.reconfigure {
+            d.mons.reconfigure = false;
+            be.reconfigure(&mut d);
+            d.damage_all();
+            let _ = layout::save_config(&d);
+        }
         be.flush();
     }
     let _ = std::fs::remove_file(&socket_path);

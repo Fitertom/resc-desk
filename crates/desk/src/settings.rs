@@ -68,12 +68,20 @@ const TILE_GAP: i32 = 12;
 const TILE_LABEL: i32 = 24;
 const DEV_ROW: i32 = 38;
 
+/// The monitor layout's height on the «Мониторы» page.
+const PLANE_H: i32 = 230;
+
 #[derive(Clone, Copy, PartialEq)]
 enum Sw {
     Frost,
     Glue,
     OutMute,
     InMute,
+    /// The chosen monitor: the main one, on, VRR, HDR.
+    Primary,
+    MonOn,
+    Vrr,
+    Hdr,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -97,19 +105,30 @@ enum Ch {
     Close,
     /// Which glass place the sliders below set.
     Place,
+    /// Monitors: how several are used (Win+P), which one the cards below set, and its
+    /// size, refresh and rotation.
+    Project,
+    Mon,
+    Res,
+    Hz,
+    Rot,
 }
 
-impl Ch {
-    fn options(self) -> &'static [&'static str] {
-        match self {
-            Ch::Launch => &["Из кнопки на панели задач", "Из значка, по которому кликнули"],
-            Ch::Close => &["Втягивается в кнопку, кнопка лопается", "Сжимается в каплю и испаряется", "Втягивается в ✕"],
-            Ch::Place => &["Проводник", "Параметры", "Календарь", "Таймер", "Заголовки остальных окон"],
-        }
-    }
+const ALL_CH: [Ch; 8] = [Ch::Launch, Ch::Close, Ch::Place, Ch::Project, Ch::Mon, Ch::Res, Ch::Hz, Ch::Rot];
 
+const ROTATIONS: [&str; 4] = ["Без поворота", "90° — портрет", "180° — вверх ногами", "270° — портрет, наоборот"];
+
+impl Ch {
     fn idx(self) -> usize {
         self as usize
+    }
+}
+
+fn hz_name(mhz: i32) -> String {
+    if mhz % 1000 == 0 {
+        format!("{} Гц", mhz / 1000)
+    } else {
+        format!("{:.2} Гц", mhz as f64 / 1000.0)
     }
 }
 
@@ -130,6 +149,8 @@ enum Ctl {
     Devices(bool),
     /// One of a few named options.
     Choice(Ch),
+    /// The monitors on the desk, to drag about.
+    Plane,
 }
 
 // ------------------------------------------------------------------ the compositor's state
@@ -141,6 +162,24 @@ struct Out {
     mhz: i32,
     plane: [f64; 4],
     scale: f64,
+}
+
+/// A connected monitor: what it does and can do (`state`: «mon», «mode»).
+#[derive(Clone, Default)]
+struct Mon {
+    name: String,
+    on: bool,
+    w: i32,
+    h: i32,
+    mhz: i32,
+    rot: u16,
+    vrr_cap: bool,
+    vrr: bool,
+    hdr_cap: bool,
+    hdr: bool,
+    primary: bool,
+    mirror: Option<String>,
+    modes: Vec<(i32, i32, i32)>,
 }
 
 #[derive(Default)]
@@ -163,11 +202,14 @@ struct Model {
     renderer: String,
     session: String,
     outputs: Vec<Out>,
+    mons: Vec<Mon>,
+    /// Win+P's way (monitors::PROJECTS).
+    project: usize,
     error: Option<String>,
 }
 
 fn fetch() -> Model {
-    let mut m = Model { max_blur: 40.0, max_bezel: 48.0, ui_scale: 1.0, ..Default::default() };
+    let mut m = Model { max_blur: 40.0, max_bezel: 48.0, ui_scale: 1.0, project: 2, ..Default::default() };
     let text = match crate::ipc::request("state") {
         Ok(t) => t,
         Err(e) => {
@@ -204,6 +246,27 @@ fn fetch() -> Model {
             "glue" => m.glue = f(0) != 0.0,
             "renderer" => m.renderer = v.to_string(),
             "session" => m.session = v.to_string(),
+            "project" => m.project = crate::monitors::PROJECTS.iter().position(|p| p.key() == v).unwrap_or(2),
+            "mon" if n.len() >= 12 => m.mons.push(Mon {
+                name: n[0].to_string(),
+                on: n[1] == "1",
+                w: f(2) as i32,
+                h: f(3) as i32,
+                mhz: f(4) as i32,
+                rot: f(5) as u16,
+                vrr_cap: n[6] == "1",
+                vrr: n[7] == "1",
+                hdr_cap: n[8] == "1",
+                hdr: n[9] == "1",
+                primary: n[10] == "1",
+                mirror: (n[11] != "-").then(|| n[11].to_string()),
+                modes: Vec::new(),
+            }),
+            "mode" if n.len() >= 4 => {
+                if let Some(mo) = m.mons.iter_mut().find(|x| x.name == n[0]) {
+                    mo.modes.push((f(1) as i32, f(2) as i32, f(3) as i32));
+                }
+            }
             "output" if n.len() >= 9 => m.outputs.push(Out {
                 name: n[0].to_string(),
                 pw: f(1) as i32,
@@ -307,9 +370,13 @@ struct App {
     /// The chosen output (0) and input (1) device, flowing between rows.
     devs: [Option<Drop>; 2],
     /// The chosen option of each `Ch`, flowing between rows.
-    chs: [Option<Drop>; 3],
+    chs: [Option<Drop>; 8],
     /// The glass place the «Стекло» page sets.
     place: usize,
+    /// The monitor the «Мониторы» page sets (its name), and a monitor being dragged on
+    /// the layout.
+    mon: String,
+    pdrag: Option<PDrag>,
     /// A page coming in: 0 → 1 (the cards fade in rising a little).
     page_t: Spring,
     /// The slider being dragged and its value (sent on release).
@@ -327,6 +394,59 @@ struct App {
     pulse: Option<crate::pulse::Pulse>,
     audio: crate::pulse::Audio,
     pulse_err: Option<String>,
+}
+
+/// A monitor dragged on the layout: its output, where it was taken (mm, from its corner),
+/// the layout's scale held while dragging, and whether it moved.
+#[derive(Clone, Copy)]
+struct PDrag {
+    i: usize,
+    grab: (f64, f64),
+    px: PXf,
+    moved: bool,
+}
+
+/// The layout's millimetres → the card's pixels: `x = bx + mm * k`.
+#[derive(Clone, Copy)]
+struct PXf {
+    k: f64,
+    bx: f64,
+    by: f64,
+}
+
+impl PXf {
+    fn r(&self, p: [f64; 4]) -> Rect {
+        let x0 = (self.bx + p[0] * self.k).round() as i32;
+        let y0 = (self.by + p[1] * self.k).round() as i32;
+        let x1 = (self.bx + (p[0] + p[2]) * self.k).round() as i32;
+        let y1 = (self.by + (p[1] + p[3]) * self.k).round() as i32;
+        Rect::from_edges(x0, y0, x1, y1)
+    }
+
+    fn mm(&self, x: f64, y: f64) -> (f64, f64) {
+        ((x - self.bx) / self.k, (y - self.by) / self.k)
+    }
+}
+
+/// Where a monitor dragged to `p` (mm) snaps: its edges onto the others' (within `tol` mm).
+fn snap_plane(p: [f64; 4], others: &[[f64; 4]], tol: f64) -> [f64; 4] {
+    let mut best = (tol, 0.0);
+    let mut besty = (tol, 0.0);
+    for o in others {
+        for (mine, theirs) in [(p[0], o[0] + o[2]), (p[0] + p[2], o[0]), (p[0], o[0]), (p[0] + p[2], o[0] + o[2])] {
+            let dx = theirs - mine;
+            if dx.abs() < best.0 {
+                best = (dx.abs(), dx);
+            }
+        }
+        for (mine, theirs) in [(p[1], o[1]), (p[1] + p[3], o[1] + o[3]), (p[1], o[1] + o[3]), (p[1] + p[3], o[1])] {
+            let dy = theirs - mine;
+            if dy.abs() < besty.0 {
+                besty = (dy.abs(), dy);
+            }
+        }
+    }
+    [p[0] + best.1, p[1] + besty.1, p[2], p[3]]
 }
 
 struct Row {
@@ -481,11 +601,105 @@ impl App {
 
     /// The option chosen now.
     fn choice(&self, ch: Ch) -> usize {
+        let mon = self.sel_mon();
         match ch {
             Ch::Launch => self.m.anim_launch,
             Ch::Close => self.m.anim_close,
             Ch::Place => self.place,
+            Ch::Project => self.m.project,
+            Ch::Mon => self.m.mons.iter().position(|m| m.name == self.mon).unwrap_or(0),
+            Ch::Res => mon.and_then(|m| self.sizes().iter().position(|s| *s == (m.w, m.h))).unwrap_or(0),
+            Ch::Hz => mon.and_then(|m| self.rates().iter().position(|r| *r == m.mhz)).unwrap_or(0),
+            Ch::Rot => mon.map_or(0, |m| (m.rot / 90) as usize),
         }
+    }
+
+    /// The options of `ch`.
+    fn opts(&self, ch: Ch) -> Vec<String> {
+        let st = |v: &[&str]| v.iter().map(|s| s.to_string()).collect();
+        match ch {
+            Ch::Launch => st(&["Из кнопки на панели задач", "Из значка, по которому кликнули"]),
+            Ch::Close => st(&["Втягивается в кнопку, кнопка лопается", "Сжимается в каплю и испаряется", "Втягивается в ✕"]),
+            Ch::Place => st(&["Проводник", "Параметры", "Календарь", "Таймер", "Заголовки остальных окон"]),
+            Ch::Project => crate::monitors::PROJECTS.iter().map(|p| p.name().to_string()).collect(),
+            Ch::Mon => self
+                .m
+                .mons
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    let state = match (&m.mirror, m.on) {
+                        (Some(s), _) => format!(" · копия {s}"),
+                        (None, false) => " · выключен".to_string(),
+                        _ if m.primary => " · основной".to_string(),
+                        _ => String::new(),
+                    };
+                    format!("{}  {}  ·  {}×{}{state}", i + 1, m.name, m.w, m.h)
+                })
+                .collect(),
+            Ch::Res => self.sizes().iter().map(|(w, h)| format!("{w} × {h}")).collect(),
+            Ch::Hz => self.rates().into_iter().map(hz_name).collect(),
+            Ch::Rot => st(&ROTATIONS),
+        }
+    }
+
+    /// The monitor the page sets.
+    fn sel_mon(&self) -> Option<&Mon> {
+        self.m.mons.iter().find(|m| m.name == self.mon).or(self.m.mons.first())
+    }
+
+    /// Its sizes, largest first (ten at most, and the one it has).
+    fn sizes(&self) -> Vec<(i32, i32)> {
+        let Some(m) = self.sel_mon() else { return Vec::new() };
+        let mut v: Vec<(i32, i32)> = Vec::new();
+        for (w, h, _) in &m.modes {
+            if !v.contains(&(*w, *h)) {
+                v.push((*w, *h));
+            }
+        }
+        v.sort_by_key(|(w, h)| std::cmp::Reverse((*w as i64 * *h as i64, *w)));
+        v.truncate(10);
+        if !v.contains(&(m.w, m.h)) {
+            v.push((m.w, m.h));
+        }
+        v
+    }
+
+    /// Its refresh rates at its size, highest first.
+    fn rates(&self) -> Vec<i32> {
+        let Some(m) = self.sel_mon() else { return Vec::new() };
+        let mut v: Vec<i32> = m.modes.iter().filter(|x| (x.0, x.1) == (m.w, m.h)).map(|x| x.2).collect();
+        if !v.contains(&m.mhz) {
+            v.push(m.mhz);
+        }
+        v.sort_by_key(|r| std::cmp::Reverse(*r));
+        v.dedup();
+        v
+    }
+
+    /// Sends a `monitor NAME ...` setting for the chosen monitor; reads the state again.
+    fn mon_cmd(&mut self, what: &str) {
+        let Some(name) = self.sel_mon().map(|m| m.name.clone()) else { return };
+        send(&format!("monitor {name} {what}"));
+        self.refresh();
+    }
+
+    /// The layout's scale: every monitor fits the card.
+    fn plane_xf(&self, at: Rect) -> PXf {
+        if let Some(d) = self.pdrag {
+            return d.px;
+        }
+        let mut b = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for o in &self.m.outputs {
+            b = (b.0.min(o.plane[0]), b.1.min(o.plane[1]), b.2.max(o.plane[0] + o.plane[2]), b.3.max(o.plane[1] + o.plane[3]));
+        }
+        if b.0 == f64::MAX {
+            return PXf { k: 1.0, bx: at.x as f64, by: at.y as f64 };
+        }
+        // Room around them for dragging one aside.
+        let (bw, bh) = ((b.2 - b.0).max(1.0), (b.3 - b.1).max(1.0));
+        let k = ((at.w as f64 - 40.0) / (bw * 1.25)).min((at.h as f64 - 30.0) / (bh * 1.3)).max(0.01);
+        PXf { k, bx: at.x as f64 + (at.w as f64 - bw * k) / 2.0 - b.0 * k, by: at.y as f64 + (at.h as f64 - bh * k) / 2.0 - b.1 * k }
     }
 
     /// The chosen glass place's value `i` (0 dim, 1 blur, 2 edge), the dragged one live.
@@ -544,6 +758,10 @@ impl App {
     fn sync_anims(&mut self) {
         self.anims.drive(AK::Switch(Sw::Frost), on(self.m.frosted), SPR_SWITCH);
         self.anims.drive(AK::Switch(Sw::Glue), on(self.m.glue), SPR_SWITCH);
+        let mon = self.sel_mon().cloned().unwrap_or_default();
+        for (sw, v) in [(Sw::Primary, mon.primary), (Sw::MonOn, mon.on), (Sw::Vrr, mon.vrr), (Sw::Hdr, mon.hdr)] {
+            self.anims.drive(AK::Switch(sw), on(v), SPR_SWITCH);
+        }
         for (sw, input) in [(Sw::OutMute, false), (Sw::InMute, true)] {
             let muted = self.sound_dev(input).map_or(false, |d| d.mute);
             self.anims.drive(AK::Switch(sw), on(muted), SPR_SWITCH);
@@ -562,9 +780,9 @@ impl App {
         self.anims.drive(AK::Btn, on(self.hot == Some(100)), SPR_HOVER);
         let l = self.layout();
         let under = |r: Rect, ptr: Option<(f64, f64)>| ptr.map_or(false, |(x, y)| r.contains(x, y) && l.view.contains(x, y));
-        for ch in [Ch::Launch, Ch::Close, Ch::Place] {
+        for ch in ALL_CH {
             let Some(row) = l.rows.iter().find(|r| r.ctl == Ctl::Choice(ch)) else { continue };
-            let hots: Vec<bool> = (0..ch.options().len()).map(|i| under(dev_rect(row.at, i), self.ptr)).collect();
+            let hots: Vec<bool> = (0..self.opts(ch).len()).map(|i| under(dev_rect(row.at, i), self.ptr)).collect();
             for (i, hot) in hots.into_iter().enumerate() {
                 self.anims.drive(AK::ChHot(ch, i), on(hot), SPR_HOVER);
             }
@@ -691,28 +909,77 @@ impl App {
                 ));
             }
             Page::Displays => {
-                for o in &m.outputs {
-                    let hz = if o.mhz > 0 { format!(" · {:.0} Гц", o.mhz as f64 / 1000.0) } else { String::new() };
-                    v.push((
-                        format!("{}  {}×{}{}", o.name, o.pw, o.ph, hz),
-                        String::new(),
-                        format!(
-                            "{:.0} × {:.0} мм, {:.1}″ · {:.2} px/мм · масштаб {:.2} · позиция {:.0}, {:.0} мм",
-                            o.plane[2],
-                            o.plane[3],
-                            o.plane[2].hypot(o.plane[3]) / 25.4,
-                            o.pw as f64 / o.plane[2].max(1.0),
-                            o.scale,
-                            o.plane[0],
-                            o.plane[1]
-                        ),
-                        Ctl::None,
-                    ));
+                v.push((
+                    "Расположение".into(),
+                    String::new(),
+                    "Перетащите мониторы так, как они стоят на столе; края прилипают друг к другу. Точно, по линейке — в «Калибровке» ниже".into(),
+                    Ctl::Plane,
+                ));
+                if m.mons.len() > 1 {
+                    v.push(("Несколько мониторов".into(), String::new(), "То же, что Win+P".into(), Ctl::Choice(Ch::Project)));
+                }
+                let sel = self.sel_mon().cloned();
+                let out = sel.as_ref().and_then(|s| m.outputs.iter().find(|o| o.name == s.name));
+                let desc = match out {
+                    Some(o) => format!(
+                        "{:.0} × {:.0} мм, {:.1}″ · {:.2} px/мм · масштаб {:.2} · позиция {:.0}, {:.0} мм",
+                        o.plane[2],
+                        o.plane[3],
+                        o.plane[2].hypot(o.plane[3]) / 25.4,
+                        o.pw as f64 / o.plane[2].max(1.0),
+                        o.scale,
+                        o.plane[0],
+                        o.plane[1]
+                    ),
+                    None => "Ничего своего не показывает (выключен или повторяет другой)".into(),
+                };
+                v.push(("Монитор".into(), String::new(), desc, Ctl::Choice(Ch::Mon)));
+                if let Some(s) = sel {
+                    if m.mons.len() > 1 {
+                        v.push((
+                            "Основной монитор".into(),
+                            String::new(),
+                            "С него начинается курсор, по нему считается масштаб; в режимах Win+P «только основной» и «повторяющийся» показывается он".into(),
+                            Ctl::Switch(Sw::Primary),
+                        ));
+                        let extend = crate::monitors::PROJECTS[m.project] == crate::monitors::Project::Extend;
+                        v.push((
+                            "Включён".into(),
+                            String::new(),
+                            if extend { String::new() } else { "Действует в режиме «Расширить»; сейчас мониторы включает Win+P".into() },
+                            Ctl::Switch(Sw::MonOn),
+                        ));
+                    }
+                    v.push(("Разрешение".into(), String::new(), String::new(), Ctl::Choice(Ch::Res)));
+                    if self.rates().len() > 1 {
+                        v.push(("Частота обновления".into(), String::new(), String::new(), Ctl::Choice(Ch::Hz)));
+                    }
+                    v.push(("Поворот".into(), String::new(), "Как монитор повёрнут на подставке: картинка поворачивается в обратную сторону".into(), Ctl::Choice(Ch::Rot)));
+                    if s.vrr_cap {
+                        v.push((
+                            "Переменная частота (VRR)".into(),
+                            String::new(),
+                            "FreeSync / Adaptive-Sync: монитор ждёт кадр, а не показывает старый — меньше рывков в играх и видео".into(),
+                            Ctl::Switch(Sw::Vrr),
+                        ));
+                    } else {
+                        v.push(("Переменная частота (VRR)".into(), "нет".into(), "Этот монитор или видеокарта её не поддерживает".into(), Ctl::None));
+                    }
+                    if s.hdr_cap {
+                        v.push((
+                            "HDR".into(),
+                            String::new(),
+                            "10 бит на канал, BT.2020 и PQ. Обычные программы остаются такими же яркими (белый — 203 нит)".into(),
+                            Ctl::Switch(Sw::Hdr),
+                        ));
+                    } else {
+                        v.push(("HDR".into(), "нет".into(), "Монитор не сообщает о поддержке HDR (PQ) или драйвер не умеет его включать".into(), Ctl::None));
+                    }
                 }
                 v.push((
                     "Масштаб интерфейса".into(),
                     format!("{:.0} %", self.ui_scale() * 100.0),
-                    "Размер всего на первом мониторе. Остальные мониторы подстраиваются так, чтобы окно везде было одного размера в миллиметрах".into(),
+                    "Размер всего на основном мониторе. Остальные подстраиваются так, чтобы окно везде было одного размера в миллиметрах".into(),
                     Ctl::Slider(Sl::UiScale),
                 ));
                 v.push((
@@ -724,8 +991,8 @@ impl App {
                 v.push((
                     "Калибровка".into(),
                     String::new(),
-                    "Линейки и миллиметровая сетка поверх всех мониторов: подогнать размеры по банковской карте и выровнять положение".into(),
-                    Ctl::Button(Btn::Calibrate, "Открыть"),
+                    "Линейки и миллиметровая сетка поверх всех мониторов: подогнать размеры по банковской карте и выровнять положение до миллиметра".into(),
+                    Ctl::Button(Btn::Calibrate, "Подробно"),
                 ));
             }
             Page::Wallpaper => {
@@ -812,7 +1079,8 @@ impl App {
                     h += 6 + rows * (th + TILE_LABEL + TILE_GAP) - TILE_GAP;
                 }
                 Ctl::Devices(input) => h += self.devices(input).len().max(1) as i32 * DEV_ROW - 6,
-                Ctl::Choice(ch) => h += ch.options().len() as i32 * DEV_ROW - 6,
+                Ctl::Choice(ch) => h += self.opts(ch).len() as i32 * DEV_ROW - 6,
+                Ctl::Plane => h += PLANE_H,
                 _ => {}
             }
             let card = Rect::new(cx, y, cw, h);
@@ -820,7 +1088,7 @@ impl App {
                 Ctl::Switch(_) => Rect::new(card.x1() - CARD_PAD - SWITCH_W as i32, card.y + (card.h - SWITCH_H as i32) / 2, SWITCH_W as i32, SWITCH_H as i32),
                 Ctl::Slider(_) => Rect::new(card.x + CARD_PAD, card.y1() - CARD_PAD - SLIDER_H + 4, card.w - 2 * CARD_PAD, SLIDER_H),
                 Ctl::Button(..) => Rect::new(card.x1() - CARD_PAD - BTN_W, card.y + (card.h - BTN_H) / 2, BTN_W, BTN_H),
-                Ctl::Walls | Ctl::Devices(_) | Ctl::Choice(_) => Rect::from_edges(card.x + CARD_PAD, card.y + body_y + 6, card.x1() - CARD_PAD, card.y1() - CARD_PAD),
+                Ctl::Walls | Ctl::Devices(_) | Ctl::Choice(_) | Ctl::Plane => Rect::from_edges(card.x + CARD_PAD, card.y + body_y + 6, card.x1() - CARD_PAD, card.y1() - CARD_PAD),
                 Ctl::None => Rect::default(),
             };
             rows.push(Row { name, value, desc, ctl, card, at });
@@ -924,16 +1192,63 @@ impl App {
             }
             Ctl::Choice(ch) => {
                 let i = ((y - row.at.y as f64) / DEV_ROW as f64).floor();
-                if i >= 0.0 && (i as usize) < ch.options().len() {
+                if i >= 0.0 && (i as usize) < self.opts(ch).len() {
                     let i = i as usize;
                     match ch {
                         Ch::Launch => self.m.anim_launch = i,
                         Ch::Close => self.m.anim_close = i,
                         Ch::Place => self.place = i,
+                        Ch::Project => {
+                            self.m.project = i;
+                            send(&format!("project {}", crate::monitors::PROJECTS[i].key()));
+                            self.refresh();
+                        }
+                        Ch::Mon => {
+                            if let Some(m) = self.m.mons.get(i) {
+                                self.mon = m.name.clone();
+                            }
+                        }
+                        Ch::Res => {
+                            let (w, h) = self.sizes()[i];
+                            let Some(m) = self.sel_mon() else { return };
+                            // The same refresh if it has it at that size, else the highest.
+                            let rates: Vec<i32> = m.modes.iter().filter(|x| (x.0, x.1) == (w, h)).map(|x| x.2).collect();
+                            let r = if rates.contains(&m.mhz) { m.mhz } else { rates.iter().copied().max().unwrap_or(m.mhz) };
+                            self.mon_cmd(&format!("mode {w}x{h}@{r}"));
+                        }
+                        Ch::Hz => {
+                            let r = self.rates()[i];
+                            let Some((w, h)) = self.sel_mon().map(|m| (m.w, m.h)) else { return };
+                            self.mon_cmd(&format!("mode {w}x{h}@{r}"));
+                        }
+                        Ch::Rot => self.mon_cmd(&format!("rot {}", i * 90)),
                     }
-                    if ch != Ch::Place {
+                    if matches!(ch, Ch::Launch | Ch::Close) {
                         send(&format!("anim {} {i}", if ch == Ch::Launch { "launch" } else { "close" }));
                     }
+                }
+            }
+            Ctl::Switch(sw @ (Sw::Primary | Sw::MonOn | Sw::Vrr | Sw::Hdr)) => {
+                let Some(m) = self.sel_mon().cloned() else { return };
+                match sw {
+                    Sw::Primary if !m.primary => {
+                        send(&format!("primary {}", m.name));
+                        self.refresh();
+                    }
+                    Sw::MonOn => self.mon_cmd(if m.on && m.mirror.is_none() { "off" } else { "on" }),
+                    Sw::Vrr => self.mon_cmd(if m.vrr { "vrr off" } else { "vrr on" }),
+                    Sw::Hdr => self.mon_cmd(if m.hdr { "hdr off" } else { "hdr on" }),
+                    _ => {}
+                }
+            }
+            Ctl::Plane => {
+                let px = self.plane_xf(row.at);
+                let hit = self.m.outputs.iter().rposition(|o| px.r(o.plane).contains(x, y));
+                if let Some(i) = hit {
+                    let o = &self.m.outputs[i];
+                    let (mx, my) = px.mm(x, y);
+                    self.mon = o.name.clone();
+                    self.pdrag = Some(PDrag { i, grab: (mx - o.plane[0], my - o.plane[1]), px, moved: false });
                 }
             }
             Ctl::Devices(input) => {
@@ -961,6 +1276,17 @@ impl App {
     }
 
     fn release(&mut self) {
+        if let Some(d) = self.pdrag.take() {
+            if d.moved {
+                if let Some(o) = self.m.outputs.get(d.i) {
+                    let p = o.plane;
+                    send(&format!("set-plane {} {:.1} {:.1} {:.2} {:.2}", o.name, p[0], p[1], p[2], p[3]));
+                    send("save");
+                }
+                self.refresh();
+            }
+            return;
+        }
         match self.drag.take() {
             Some(Sl::Blur) => {
                 if (self.drag_val as f32 - self.m.blur).abs() > 0.01 {
@@ -992,6 +1318,17 @@ impl App {
 
     fn motion(&mut self, x: f64, y: f64) {
         self.ptr = Some((x, y));
+        if let Some(d) = self.pdrag.as_mut() {
+            let (mx, my) = d.px.mm(x, y);
+            let i = d.i;
+            let tol = 16.0 / d.px.k;
+            d.moved = true;
+            let Some(p) = self.m.outputs.get(i).map(|o| o.plane) else { return };
+            let others: Vec<[f64; 4]> = self.m.outputs.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, o)| o.plane).collect();
+            let want = [mx - d.grab.0, my - d.grab.1, p[2], p[3]];
+            self.m.outputs[i].plane = snap_plane(want, &others, tol);
+            return;
+        }
         if let Some(sl) = self.drag {
             self.slider_at(sl, x);
             return;
@@ -1039,8 +1376,10 @@ pub fn run(args: &[String]) -> i32 {
         anims: Anims::default(),
         nav: Drop::at(PAGES.iter().position(|p| p.0 == page).unwrap_or(0) as f32),
         devs: [None, None],
-        chs: [None, None, None],
+        chs: [None; 8],
         place: 0,
+        mon: String::new(),
+        pdrag: None,
         page_t: Spring::new(1.0, 0.32, 1.0),
         drag: None,
         drag_val: 0.0,
@@ -1060,6 +1399,7 @@ pub fn run(args: &[String]) -> i32 {
     app.set_page(first);
     let mut dirty = true;
     let mut last = sys::now_ns();
+    let mut last_state = last;
     app.sync_anims();
     loop {
         let animating = app.animating();
@@ -1128,6 +1468,19 @@ pub fn run(args: &[String]) -> i32 {
         }
         if app.page == Page::Sound && app.sound_poll() {
             dirty = true;
+        }
+        // Monitors change elsewhere too (Win+P, plugged in): read them again now and then.
+        if app.page == Page::Displays && app.pdrag.is_none() && app.drag.is_none() && sys::now_ns() - last_state > 1_000_000_000 {
+            last_state = sys::now_ns();
+            let (outs, mons, project) = (app.m.outputs.len(), app.m.mons.len(), app.m.project);
+            let before: Vec<_> = app.m.mons.iter().map(|m| (m.name.clone(), m.on, m.w, m.h, m.mhz, m.rot, m.primary, m.mirror.clone())).collect();
+            let planes: Vec<[f64; 4]> = app.m.outputs.iter().map(|o| o.plane).collect();
+            app.refresh();
+            let after: Vec<_> = app.m.mons.iter().map(|m| (m.name.clone(), m.on, m.w, m.h, m.mhz, m.rot, m.primary, m.mirror.clone())).collect();
+            let planes2: Vec<[f64; 4]> = app.m.outputs.iter().map(|o| o.plane).collect();
+            if outs != app.m.outputs.len() || mons != app.m.mons.len() || project != app.m.project || before != after || planes != planes2 {
+                dirty = true;
+            }
         }
         let now = sys::now_ns();
         let dt = ((now - last) as f64 / 1e9).min(0.05) as f32;
@@ -1443,7 +1796,7 @@ fn draw_page(app: &App, cv: &mut Canvas, l: &Layout) {
                 switch(cv, vclip, xf, row.at.x as f32, row.at.y as f32, sp.value, sp.velocity);
             }
             Ctl::Choice(ch) => {
-                let opts = ch.options();
+                let opts = app.opts(ch);
                 for i in 0..opts.len() {
                     let hot = app.anims.get(AK::ChHot(ch, i));
                     if hot > 0.01 {
@@ -1527,7 +1880,7 @@ fn draw_page(app: &App, cv: &mut Canvas, l: &Layout) {
                     }
                     if sel > 0.01 {
                         let grow = (2.0 * sel).round() as i32;
-                        cv.rrect_stroke(vclip, xf.r(t.inflate(grow)), xf.len(8 + grow), 1.0 + 2.0 * sel.min(1.0), (crate::look::accent() & 0xff_ffff), a(sel), a(sel));
+                        cv.rrect_stroke(vclip, xf.r(t.inflate(grow)), xf.len(8 + grow), 1.0 + 2.0 * sel.min(1.0), crate::look::accent() & 0xff_ffff, a(sel), a(sel));
                     }
                     let name = match path {
                         None => "Liquify (встроенные)".to_string(),
@@ -1535,6 +1888,32 @@ fn draw_page(app: &App, cv: &mut Canvas, l: &Layout) {
                     };
                     let name = crate::shell::ellipsize(&name, 12.0, font::W::Text, t.w);
                     font::draw_text(cv, vclip, xf, t.x, t.y1() + 17, &name, 12.0, text_color(0.6 + 0.4 * sel.clamp(0.0, 1.0)), t.w);
+                }
+            }
+            Ctl::Plane => {
+                let px = app.plane_xf(row.at);
+                cv.rrect(vclip, xf.r(row.at), xf.len(12), argb(40, 0, 0, 0));
+                let sel = app.sel_mon().map(|m| m.name.clone());
+                for (i, o) in app.m.outputs.iter().enumerate() {
+                    let r = px.r(o.plane).inflate(-2);
+                    let chosen = sel.as_deref() == Some(o.name.as_str());
+                    let dragged = app.pdrag.map_or(false, |d| d.i == i);
+                    let fill = if chosen { crate::look::accent_a(if dragged { 110 } else { 80 }) } else { argb(36, 255, 255, 255) };
+                    cv.rrect(vclip, xf.r(r), xf.len(8), fill);
+                    let (sc, a) = if chosen { (crate::look::accent_light(0.35) & 0xff_ffff, 255) } else { (0xffffff, 70) };
+                    cv.rrect_stroke(vclip, xf.r(r), xf.len(8), if chosen { 2.0 } else { 1.0 }, sc, a, a);
+                    let n = app.m.mons.iter().position(|m| m.name == o.name).map_or(i + 1, |k| k + 1).to_string();
+                    let size = (r.h as f32 * 0.32).clamp(14.0, 34.0);
+                    let nw = font::text_width_w(&n, size, font::W::Bold);
+                    font::draw_text_w(cv, vclip, xf, r.x + (r.w - nw) / 2, r.y + r.h / 2 + (size * 0.25) as i32, &n, size, text_color(0.95), r.w, font::W::Bold);
+                    if r.h > 60 && r.w > 70 {
+                        let label = crate::shell::ellipsize(&format!("{}  {}×{}", o.name, o.pw, o.ph), 11.5, font::W::Text, r.w - 12);
+                        let lw = font::text_width(&label, 11.5);
+                        font::draw_text(cv, vclip, xf, r.x + (r.w - lw) / 2, r.y1() - 10, &label, 11.5, text_color(0.7), r.w - 12);
+                    }
+                    if app.m.mons.iter().any(|m| m.name == o.name && m.primary) && app.m.mons.len() > 1 {
+                        font::draw_text_w(cv, vclip, xf, r.x + 8, r.y + 17, "основной", 11.0, text_color(0.85), r.w - 16, font::W::Semi);
+                    }
                 }
             }
             Ctl::Slider(sl) => slider(cv, vclip, xf, row.at, app.anims.get(AK::Slider(sl))),

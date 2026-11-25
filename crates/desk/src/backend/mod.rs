@@ -21,6 +21,15 @@ pub trait Backend {
     /// Once a second (the main loop's housekeeping timer).
     fn housekeeping(&mut self, _d: &mut Desk) {}
     fn name(&self) -> &'static str;
+    /// The monitors connected, with what they can do and do now.
+    fn monitors(&self, d: &Desk) -> Vec<crate::monitors::MonInfo> {
+        d.outputs
+            .iter()
+            .map(|o| crate::monitors::MonInfo { name: o.name.clone(), modes: vec![(o.pw, o.ph, o.refresh_mhz)], cur: (o.pw, o.ph, o.refresh_mhz), on: true, ..Default::default() })
+            .collect()
+    }
+    /// Applies the monitor settings (d.display_cfg: each monitor's, the main one, Win+P).
+    fn reconfigure(&mut self, _d: &mut Desk) {}
 }
 
 /// One emulated monitor: pixels, optional physical size and plane position (mm),

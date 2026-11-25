@@ -1094,8 +1094,8 @@ fn shortcut(d: &mut Desk, code: u32) -> bool {
         key::D | key::M => wm::show_desktop(d),
         // Win+S = search: our start menu (the bare Win key is eaten by Windows when nested).
         key::S => shell::toggle_start(d),
-        // Win+P: monitor layout & ruler calibration.
-        key::P => crate::layout::toggle_calibration(d),
+        // Win+P: how several monitors are used (monitors.rs).
+        key::P => crate::monitors::toggle(d),
         // Win+V: clipboard history.
         key::V => crate::clipboard::toggle(d),
         // Win+I: settings, as in Windows.
