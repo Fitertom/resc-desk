@@ -17,7 +17,9 @@ if gh release view "$VER" >/dev/null 2>&1; then
     exit 0
 fi
 WIN=$(pwd -W 2>/dev/null || pwd)
-SRC="/mnt/$(echo "$WIN" | sed -E 's|^([A-Za-z]):|\L\1|; s|\|/|g')"
+# C:/Users/... (pwd -W) → /mnt/c/Users/...
+DRIVE=$(echo "$WIN" | cut -c1 | tr 'A-Z' 'a-z')
+SRC="/mnt/$DRIVE$(echo "$WIN" | cut -c3-)"
 echo "building $VER in $DISTRO ($SRC)"
 wsl -d "$DISTRO" -- bash -lc "cd '$SRC' && RESC_BUILD_OVERRIDE=$VER CARGO_TARGET_DIR=\$HOME/target cargo build --release -q -p desk && \$HOME/target/release/resc-desk version && mkdir -p /tmp/resc-release && cp \$HOME/target/release/resc-desk /tmp/resc-release/resc-desk-x86_64 && cd /tmp/resc-release && sha256sum resc-desk-x86_64 > resc-desk-x86_64.sha256 && cat resc-desk-x86_64.sha256"
 OUT=$(mktemp -d)
