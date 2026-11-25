@@ -139,6 +139,77 @@ struct Out {
     inst: Buffer,
     /// Not drawn yet: every image starts UNDEFINED and the whole output is damaged.
     fresh: bool,
+    /// Windows' frosts kept between frames (GlassOp::id).
+    gcache: HashMap<u64, GCache>,
+}
+
+/// A window glass's frost kept between frames (GlassOp::id): the blurred level, read by
+/// ui.frag like Blur's [1].
+struct GCache {
+    img: Image,
+    set: H,
+    level: u32,
+    under: u64,
+    fresh: bool,
+}
+
+/// Backdrops captured and blurred, and kept frosts used instead (ctl stats).
+pub static BLURS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static KEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Frames drawn: what cannot be known to be the same (a drop's backdrop) hashes this.
+static FRAME_NO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn hash_draw(h: &mut std::collections::hash_map::DefaultHasher, dr: &Draw, gen: u64) {
+    use std::hash::Hash;
+    let r = |h: &mut std::collections::hash_map::DefaultHasher, r: &Rect| (r.x, r.y, r.w, r.h).hash(h);
+    let fs = |h: &mut std::collections::hash_map::DefaultHasher, v: &[f32]| v.iter().for_each(|x| x.to_bits().hash(h));
+    match dr {
+        Draw::Tex { set, dst, uv, round, alpha } => {
+            (0u8, *set, gen).hash(h);
+            r(h, dst);
+            fs(h, uv);
+            fs(h, round);
+            fs(h, &[*alpha]);
+        }
+        Draw::Color { dst, color, round, alpha } => {
+            1u8.hash(h);
+            r(h, dst);
+            fs(h, color);
+            fs(h, round);
+            fs(h, &[*alpha]);
+        }
+    }
+}
+
+fn draw_dst(dr: &Draw) -> Rect {
+    match dr {
+        Draw::Tex { dst, .. } | Draw::Color { dst, .. } => *dst,
+    }
+}
+
+/// What lies under a glass whose frost reads `zone` (physical), drawn before it: the
+/// wallpaper, `draws` with their pictures' generations, and the glass below (`ops`).
+fn under_key(zone: Rect, sigma: f32, wall: (u64, i32, i32), draws: &[Draw], gens: &[u64], ops: &[GlassOp]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (zone.x, zone.y, zone.w, zone.h, sigma.to_bits(), wall).hash(&mut h);
+    for (i, dr) in draws.iter().enumerate() {
+        if draw_dst(dr).overlaps(&zone) {
+            hash_draw(&mut h, dr, gens.get(i).copied().unwrap_or(0));
+        }
+    }
+    for op in ops.iter().filter(|o| o.rect.overlaps(&zone)) {
+        (op.rect.x, op.rect.y, op.rect.w, op.rect.h, op.id).hash(&mut h);
+        op.radii.iter().chain(op.tint.iter()).chain([op.bezel, op.sigma].iter()).for_each(|x| x.to_bits().hash(&mut h));
+        if let Some(inst) = &op.drop {
+            inst.iter().flatten().for_each(|x| x.to_bits().hash(&mut h));
+        }
+        // A glass whose own backdrop is not known: this frame only.
+        let u = if op.id != 0 { op.under } else { FRAME_NO.load(std::sync::atomic::Ordering::Relaxed) };
+        u.hash(&mut h);
+    }
+    h.finish() | 1
 }
 
 /// The frost's images and sets (see Out::blur).
@@ -239,6 +310,7 @@ const DRM_EXT: &[u8] = b"VK_EXT_physical_device_drm\0";
 const KHR_DYNAMIC_RENDERING: &[u8] = b"VK_KHR_dynamic_rendering\0";
 
 /// One glass panel of the frame, physical px.
+#[derive(Default)]
 pub struct GlassOp {
     pub rect: Rect,
     /// Corner radii: top-left, top-right, bottom-right, bottom-left.
@@ -260,6 +332,13 @@ pub struct GlassOp {
     pub drop: Option<[[f32; 4]; 12]>,
     /// Its frost's sigma, physical px (each glass place has its own, look.rs; 0: none).
     pub sigma: f32,
+    /// Its frost kept between frames (a window's glass): who it is (0: not kept), what lay
+    /// under it (a hash of everything drawn below it in its zone), and whether the kept frost
+    /// is of that very picture (then it is neither captured nor blurred again, and damage
+    /// inside it does not grow to the whole panel).
+    pub id: u64,
+    pub under: u64,
+    pub hit: bool,
 }
 
 /// Window glass: deeper than the panels', so titles stay readable over anything.
@@ -290,7 +369,7 @@ fn window_glass(d: &Desk, wk: WKey, xf: Xf, before: usize) -> Option<GlassOp> {
     // The place's own dim, blur and edge (look.rs): «Проводник», «Параметры», other windows.
     let g = crate::look::glass(crate::look::Place::of_app(&w.app_id));
     let tint = crate::glass::tint_at(TINT_WINDOW, g.dim);
-    Some(GlassOp { rect: xf.r(f), radii: [r; 4], layer: 0, before, tint, bezel: g.bezel * s, panel: false, cover, drop: None, sigma: g.blur * s })
+    Some(GlassOp { rect: xf.r(f), radii: [r; 4], layer: 0, before, tint, bezel: g.bezel * s, panel: false, cover, drop: None, sigma: g.blur * s, ..Default::default() })
 }
 
 /// The drop a moving drop bridges to: the hover one or a drop of its own (life.rs) at its
@@ -354,7 +433,7 @@ fn drop_op(xf: Xf, p: &crate::winanim::Pose, active: bool, hover: Option<Rect>, 
         [glass::THICKNESS * s, glass::BORDER_W * s, 0.0, 0.0],
     ];
     let rect = Rect::from_edges(bb[0].floor() as i32, bb[1].floor() as i32, bb[2].ceil() as i32, bb[3].ceil() as i32);
-    GlassOp { rect, radii: [l.r * s; 4], layer, before, tint, bezel: bez[0], panel: false, cover: [Rect::default(); 2], drop: Some(inst), sigma: glass::frost() * s }
+    GlassOp { rect, radii: [l.r * s; 4], layer, before, tint, bezel: bez[0], panel: false, cover: [Rect::default(); 2], drop: Some(inst), sigma: glass::frost() * s, ..Default::default() }
 }
 
 /// One of «Пуск»'s drops (startanim.rs) on output `xf`, in a panel's look; `hover`: the
@@ -394,7 +473,7 @@ fn start_op(xf: Xf, sp: &crate::startanim::DropSpec, hover: Option<Rect>) -> Gla
         [glass::THICKNESS * s, glass::BORDER_W * s, 0.0, 0.0],
     ];
     let rect = Rect::from_edges(bb[0].floor() as i32, bb[1].floor() as i32, bb[2].ceil() as i32, bb[3].ceil() as i32);
-    GlassOp { rect, radii: [sp.ra * s; 4], layer: sp.layer, before: 0, tint: sp.tint[0], bezel: sp.bezel * s, panel: false, cover: [Rect::default(); 2], drop: Some(inst), sigma: crate::glass::frost() * s }
+    GlassOp { rect, radii: [sp.ra * s; 4], layer: sp.layer, before: 0, tint: sp.tint[0], bezel: sp.bezel * s, panel: false, cover: [Rect::default(); 2], drop: Some(inst), sigma: crate::glass::frost() * s, ..Default::default() }
 }
 
 fn cstr(s: &[u8]) -> *const std::ffi::c_char {
@@ -986,6 +1065,10 @@ impl Gpu {
         for ft in o.frames.values() {
             self.free_tex(&ft.tex);
         }
+        for c in o.gcache.values() {
+            (self.f.vkFreeDescriptorSets)(self.dev, self.dpool, 1, &c.set);
+            self.free_image(&c.img);
+        }
         self.free_image(&o.target);
         self.free_image(&o.backdrop);
         self.free_buffer(&o.readback);
@@ -1436,6 +1519,7 @@ impl Gpu {
             readback,
             inst,
             fresh: true,
+            gcache: HashMap::new(),
         });
         Ok(self.outs.len() - 1)
     }
@@ -1499,6 +1583,11 @@ impl Gpu {
         let mut waits: Vec<H> = Vec::new();
         let mut frames_seen = Vec::new();
         let mut win_ops: Vec<GlassOp> = Vec::new();
+        // The pictures' generations of `draws` (a surface's commits, a frame's key).
+        let mut gens: Vec<u64> = Vec::new();
+        let wall_key = self.outs[k].wall_key.unwrap_or_default();
+        let out_fresh = self.outs[k].fresh;
+        let m_px = crate::glass::margin(xf.scale as f32);
         // Glass the damage widens to (and what of it a window's opaque content covers).
         let mut zones: Vec<(Rect, [Rect; 2])> = Vec::new();
         for it in items {
@@ -1523,12 +1612,28 @@ impl Gpu {
                         frames_seen.push(wk);
                         continue;
                     }
-                    if let Some(op) = window_glass(d, wk, xf, draws.len()) {
-                        zones.push((op.rect, op.cover));
+                    if let Some(mut op) = window_glass(d, wk, xf, draws.len()) {
+                        // Its frost kept: still good if nothing under it changed.
+                        let zone = op.rect.inflate(m_px).intersect(&bounds);
+                        op.id = {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            ("win", wk).hash(&mut h);
+                            h.finish() | 1
+                        };
+                        op.under = under_key(zone, op.sigma, wall_key, &draws, &gens, &win_ops);
+                        let level = blur_plan(op.sigma, w, h).map(|p| p.0);
+                        op.hit = !out_fresh
+                            && level.is_some()
+                            && self.outs[k].gcache.get(&op.id).map_or(false, |c| !c.fresh && c.under == op.under && Some(c.level) == level);
+                        if !op.hit {
+                            zones.push((op.rect, op.cover));
+                        }
                         win_ops.push(op);
                     }
                     if let Some((set, at)) = unsafe { self.sync_frame(d, k, wk, xf, &mut ups)? } {
                         draws.push(Draw::Tex { set, dst: at, uv: [0.0, 0.0, 1.0, 1.0], round: [0.0; 6], alpha: 1.0 });
+                        gens.push(self.outs[k].frames.get(&wk).map_or(0, |f| f.key));
                         frames_seen.push(wk);
                     }
                 }
@@ -1540,6 +1645,7 @@ impl Gpu {
                     };
                     if let Some(dr) = unsafe { self.surface_draw(d, sk, dst, round, 1.0, &mut ups, &mut dmas, &mut waits)? } {
                         draws.push(dr);
+                        gens.push(d.surfaces.get(sk).map_or(0, |s| s.gen));
                     }
                 }
             }
@@ -1620,8 +1726,7 @@ impl Gpu {
                 panel: true,
                 cover: [Rect::default(); 2],
                 drop: None,
-                sigma: crate::glass::frost() * s0,
-            };
+                sigma: crate::glass::frost() * s0, ..Default::default() };
             zones.push((op.rect, op.cover));
             at_ops.push(op);
         }
@@ -1698,17 +1803,41 @@ impl Gpu {
                         panel: true,
                         cover: [Rect::default(); 2],
                         drop: None,
-                        sigma: place.map_or(crate::glass::frost(), |g| if crate::glass::frosted() { g.blur } else { 0.0 }) * s,
-                    }
+                        sigma: place.map_or(crate::glass::frost(), |g| if crate::glass::frosted() { g.blur } else { 0.0 }) * s, ..Default::default() }
                 }),
         );
         ops.extend(card_op);
         ops.extend(start_ops);
         ops.extend(at_ops);
         ops.truncate(MAX_GLASS as usize);
+        let captured: Vec<bool>;
         unsafe {
+            // Kept frosts: one image per window glass at its frost's level; the ones of
+            // windows gone from here go too.
+            let live: Vec<u64> = ops.iter().filter(|o| o.id != 0).map(|o| o.id).collect();
+            let dead: Vec<u64> = self.outs[k].gcache.keys().copied().filter(|id| !live.contains(id)).collect();
+            for id in dead {
+                if let Some(c) = self.outs[k].gcache.remove(&id) {
+                    (self.f.vkFreeDescriptorSets)(self.dev, self.dpool, 1, &c.set);
+                    self.free_image(&c.img);
+                }
+            }
+            for op in ops.iter().filter(|o| o.id != 0) {
+                let Some((b, _, _)) = Self::blur_for(&self.outs[k], op.sigma) else { continue };
+                let (level, bw, bh) = (b.level, b.w, b.h);
+                if self.outs[k].gcache.get(&op.id).map_or(false, |c| c.level == level) {
+                    continue;
+                }
+                if let Some(c) = self.outs[k].gcache.remove(&op.id) {
+                    (self.f.vkFreeDescriptorSets)(self.dev, self.dpool, 1, &c.set);
+                    self.free_image(&c.img);
+                }
+                let img = self.image(bw, bh, 1, usage::COLOR_ATTACHMENT | usage::SAMPLED)?;
+                let set = self.set_with(img.view, self.s_lin, 5, layout::SHADER_READ)?;
+                self.outs[k].gcache.insert(op.id, GCache { img, set, level, under: 0, fresh: true });
+            }
             self.write_instances(k, &ops, s);
-            self.record(k, &ups, &lcopy, &rects, &ops, &draws, &[ldraws, l2draws], &dmas, s)?;
+            captured = self.record(k, &ups, &lcopy, &rects, &ops, &draws, &[ldraws, l2draws], &dmas, s)?;
             let stages = vec![stage::FRAGMENT; waits.len()];
             let si = SubmitInfo {
                 s_type: st::SUBMIT_INFO,
@@ -1726,6 +1855,18 @@ impl Gpu {
             (self.f.vkResetFences)(self.dev, 1, &self.fence);
         }
         self.outs[k].fresh = false;
+        FRAME_NO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // What the kept frosts are of now: blurred whole this frame, or not to be trusted.
+        for (i, op) in ops.iter().enumerate().filter(|(_, o)| o.id != 0) {
+            if let Some(c) = self.outs[k].gcache.get_mut(&op.id) {
+                c.fresh = false;
+                if captured.get(i).copied().unwrap_or(false) {
+                    c.under = op.under;
+                } else if !op.hit {
+                    c.under = 0;
+                }
+            }
+        }
 
         // The frame back into the backend's buffer.
         let rb = unsafe { std::slice::from_raw_parts(self.outs[k].readback.ptr as *const u32, (w * h) as usize) };
@@ -1911,6 +2052,7 @@ impl Gpu {
     /// What lies under glass panel `op` (the frame so far), copied to the backdrop and
     /// mip-mapped over the part its frost reads. Outside a render pass.
     unsafe fn capture_backdrop(&self, k: usize, op: &GlassOp, s: f32) {
+        BLURS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let out = &self.outs[k];
         let (f, cmd) = (&self.f, self.cmd);
         let bounds = Rect::new(0, 0, out.w, out.h);
@@ -1964,8 +2106,12 @@ impl Gpu {
             let zl = Rect::from_edges(z.x >> l, z.y >> l, (z.x1() + (1 << l) - 1) >> l, (z.y1() + (1 << l) - 1) >> l).intersect(&Rect::new(0, 0, b.w, b.h));
             let read = (stage::FRAGMENT, access::SHADER_READ, layout::SHADER_READ);
             let write = (stage::COLOR_OUTPUT, access::COLOR_WRITE, layout::COLOR_ATTACHMENT);
+            let keep = (op.id != 0).then(|| out.gcache.get(&op.id)).flatten().filter(|c| c.level == l);
             for (pass, dir) in [[1.0f32, 0.0], [0.0, 1.0]].into_iter().enumerate() {
-                let dst = &b.imgs[pass];
+                let dst = match keep {
+                    Some(c) if pass == 1 => &c.img,
+                    _ => &b.imgs[pass],
+                };
                 self.barrier(dst.img, col, read, write);
                 self.blur_pass(b, dst.view, b.sets[pass], zl, [dir[0], dir[1], sigma, radius]);
                 self.barrier(dst.img, col, write, read);
@@ -2095,7 +2241,10 @@ impl Gpu {
         // (No frost asked: the sharp backdrop, tinted and refracted only.)
         ui[10] = 0.0;
         let set = match Self::blur_for(out, op.sigma) {
-            Some((b, _, _)) => b.sets[2],
+            Some((b, _, _)) => match (op.id != 0).then(|| out.gcache.get(&op.id)).flatten().filter(|c| c.level == b.level) {
+                Some(c) => c.set,
+                None => b.sets[2],
+            },
             None => out.bd_set,
         };
         ui[11] = 1.0;
@@ -2116,7 +2265,8 @@ impl Gpu {
     }
 
     #[allow(clippy::too_many_arguments)]
-    unsafe fn record(&self, k: usize, ups: &[Upload], lcopy: &[Vec<Rect>; 2], rects: &[Rect], ops: &[GlassOp], draws: &[Draw], ldraws: &[Vec<Draw>; 2], dmas: &[(H, bool)], s: f32) -> R<()> {
+    unsafe fn record(&self, k: usize, ups: &[Upload], lcopy: &[Vec<Rect>; 2], rects: &[Rect], ops: &[GlassOp], draws: &[Draw], ldraws: &[Vec<Draw>; 2], dmas: &[(H, bool)], s: f32) -> R<Vec<bool>> {
+        let mut captured = vec![false; ops.len()];
         let out = &self.outs[k];
         let (f, cmd) = (&self.f, self.cmd);
         (f.vkResetCommandBuffer)(cmd, 0);
@@ -2157,6 +2307,9 @@ impl Gpu {
                 self.barrier(i.img, col, (stage::TOP, access::NONE, layout::UNDEFINED), (stage::FRAGMENT, access::SHADER_READ, layout::SHADER_READ));
             }
         }
+        for c in out.gcache.values().filter(|c| c.fresh) {
+            self.barrier(c.img.img, col, (stage::TOP, access::NONE, layout::UNDEFINED), (stage::FRAGMENT, access::SHADER_READ, layout::SHADER_READ));
+        }
         // Clients' dma-bufs: ours to read for this frame (PREINITIALIZED the first time: the
         // contents are the client's, not to be thrown away).
         for &(img, first) in dmas {
@@ -2181,9 +2334,18 @@ impl Gpu {
                 }
                 self.draw_windows(k, &draws[start..op.before], *w);
                 start = op.before;
-                (f.vkCmdEndRendering)(cmd);
-                self.capture_backdrop(k, op, s);
-                self.begin_rendering(k, *w);
+                // Its kept frost is of what is under it now: drawn from it as it is.
+                if op.hit {
+                    KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    (f.vkCmdEndRendering)(cmd);
+                    self.capture_backdrop(k, op, s);
+                    self.begin_rendering(k, *w);
+                    let zone = op.rect.inflate(m).intersect(&Rect::new(0, 0, out.w, out.h));
+                    if w.contains_rect(&zone) {
+                        captured[i] = true;
+                    }
+                }
                 self.draw_glass(k, i, op, s);
             }
             self.draw_windows(k, &draws[start..], *w);
@@ -2228,7 +2390,8 @@ impl Gpu {
         }
         let mb = MemoryBarrier { s_type: st::MEMORY_BARRIER, p_next: std::ptr::null(), src_access: access::TRANSFER_WRITE, dst_access: access::HOST_READ };
         (f.vkCmdPipelineBarrier)(cmd, stage::TRANSFER, stage::HOST, 0, 1, &mb, 0, std::ptr::null(), 0, std::ptr::null());
-        check((f.vkEndCommandBuffer)(cmd), "vkEndCommandBuffer")
+        check((f.vkEndCommandBuffer)(cmd), "vkEndCommandBuffer")?;
+        Ok(captured)
     }
 }
 

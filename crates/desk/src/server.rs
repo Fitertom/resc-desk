@@ -1167,6 +1167,9 @@ fn apply_state(d: &mut Desk, sk: SKey, p: Pending) {
     s.frame_cbs.extend(p.frame_cbs);
     // What changed in the buffer's own pixels, for the GPU's copy of it (gpu.rs uploads only
     // that). A viewport or a new size: all of it.
+    if s.buffer.is_some() && (s.tex_full || !p.damage_buffer.is_empty() || !p.damage_surface.is_empty() || s.w != old_w || s.h != old_h) {
+        s.gen += 1;
+    }
     if s.buffer.is_some() && !s.tex_full {
         if s.w != old_w || s.h != old_h || s.vp_src.is_some() || s.vp_dst.is_some() {
             s.tex_full = true;

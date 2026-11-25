@@ -233,6 +233,8 @@ pub struct Surface {
     /// Buffer pixels changed since the GPU last copied them (gpu.rs), or all of them.
     pub tex_dmg: Vec<Rect>,
     pub tex_full: bool,
+    /// Bumped whenever its pixels change (the glass over it knows its frost is still good).
+    pub gen: u64,
     /// The X window this surface was given to (Xwayland's surfaces, xwm.rs); 0 for none.
     /// A surface is given to an X window only once.
     pub xwin: u32,
@@ -277,6 +279,7 @@ impl Surface {
             destroyed: false,
             tex_dmg: Vec::new(),
             tex_full: true,
+            gen: 0,
             xwin: 0,
             x_pos: None,
         }

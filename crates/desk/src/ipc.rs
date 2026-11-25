@@ -103,6 +103,9 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
                 d.seat.x,
                 d.seat.y
             ));
+            use std::sync::atomic::Ordering::Relaxed;
+            out.push_str(&format!("glass: blurred {} kept {}
+", crate::gpu::BLURS.load(Relaxed), crate::gpu::KEPT.load(Relaxed)));
         }
         // place-next APP X Y: the next window of APP opens with its point (X, Y) under the pointer.
         "place-next" => {
