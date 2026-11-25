@@ -640,7 +640,7 @@ mod tests {
     #[test]
     fn png_roundtrip_through_own_encoder() {
         let (w, h) = (37, 11);
-        let px: Vec<u32> = (0..w * h).map(|i| 0xff00_0000 | (i as u32 * 2654435761) & 0xff_ffff).collect();
+        let px: Vec<u32> = (0..w * h).map(|i| 0xff00_0000 | (i as u32).wrapping_mul(2654435761) & 0xff_ffff).collect();
         let png = crate::png::encode(&px, w as i32, h as i32, w, 1);
         let img = super::decode_png(&png).expect("decode");
         assert_eq!((img.w, img.h), (w, h));
