@@ -8,9 +8,9 @@
 //! - the wheel, PgUp / PgDn: months; the month's title, Home: back to today;
 //! - the pointer leaving the flyout (once it was in), Esc: closes it.
 //!
-//! Below the month: a timer (presets, the wheel over the digits, start / pause / reset)
-//! and an alarm (the wheel over the hours and minutes, on / off, «in 15 minutes»). When
-//! either goes off the flyout opens, a chime plays every few seconds and the taskbar
+//! The clock's time opens a flyout of its own: a timer (presets, the wheel over the digits,
+//! start / pause / reset) and an alarm (the wheel over the hours and minutes, on / off,
+//! «in 15 minutes»). When either goes off that flyout opens, a chime plays every few seconds and the taskbar
 //! clock says so, until «Стоп» or the flyout is closed (two minutes at most).
 //!
 //! Kept in ~/.config/resc-desk/: calendar.txt (`YYYY-MM-DD<TAB>mark|note<TAB>text`, as
@@ -26,7 +26,7 @@ use crate::geom::Rect;
 use crate::render::{argb, Canvas, Xf};
 use crate::shell::{self, col, phys};
 use crate::textedit::TextField;
-use crate::tray::{days_from_civil, weekday};
+use crate::tray::{days_from_civil, weekday, Fly};
 
 const PAD: i32 = 16;
 const CW: i32 = 44;
@@ -36,11 +36,13 @@ const Y_HEAD: i32 = 58;
 const Y_WD: i32 = Y_HEAD + 34;
 const Y_GRID: i32 = Y_WD + 26;
 const Y_NOTE: i32 = Y_GRID + 6 * RH + 4;
-const Y_SEP: i32 = Y_NOTE + 44;
-const Y_TABS: i32 = Y_SEP + 12;
+/// The calendar flyout's height.
+pub const H: i32 = Y_NOTE + 36 + PAD - 4;
+// The timer flyout.
+const Y_TABS: i32 = PAD;
 const Y_BIG: i32 = Y_TABS + 40;
 const Y_CHIPS: i32 = Y_BIG + 56;
-pub const H: i32 = Y_CHIPS + 30 + PAD;
+pub const TIMER_H: i32 = Y_CHIPS + 30 + PAD;
 
 const KEY_HOME: u32 = 102;
 const BIG: f32 = 30.0;
@@ -457,8 +459,8 @@ pub fn tick(d: &mut Desk) {
         d.tray.cal.edit = None;
         // Show it where the pointer is.
         let oi = d.outputs.iter().position(|o| o.rect().contains(d.seat.x, d.seat.y)).unwrap_or(0);
-        if !crate::tray::is_open(d, crate::tray::Fly::Calendar) {
-            crate::tray::toggle(d, oi, crate::tray::Fly::Calendar);
+        if !crate::tray::is_open(d, Fly::Timer) {
+            crate::tray::toggle(d, oi, Fly::Timer);
             d.tray.cal.start_ring(what, now);
         }
     }
@@ -472,7 +474,7 @@ pub fn tick(d: &mut Desk) {
     }
     if d.tray.cal.run != Run::Idle || d.tray.cal.ring.is_some() {
         shell::damage_clocks(d);
-        if crate::tray::is_open(d, crate::tray::Fly::Calendar) {
+        if crate::tray::is_open(d, Fly::Timer) {
             damage(d);
         }
     }
@@ -576,9 +578,13 @@ fn digit_rects(p: Rect, parts: &[String]) -> Vec<(Option<u8>, Rect, String)> {
     v
 }
 
-pub fn hits(d: &Desk, p: Rect) -> Vec<(CHot, Rect)> {
+pub fn hits(d: &Desk, p: Rect, f: Fly) -> Vec<(CHot, Rect)> {
     let c = &d.tray.cal;
     let mut v = Vec::new();
+    if f == Fly::Timer {
+        timer_hits(c, p, &mut v);
+        return v;
+    }
     let (sy, sm, _) = shown(c);
     v.push((CHot::Today, Rect::new(p.x + 8, p.y + 6, p.w - 110, 40)));
     let hw = font::text_width_w(&format!("{} {}", MONTHS[sm as usize - 1], sy), 14.0, font::W::Semi);
@@ -591,6 +597,10 @@ pub fn hits(d: &Desk, p: Rect) -> Vec<(CHot, Rect)> {
     if c.edit.is_some() {
         v.push((CHot::Note, Rect::new(p.x + PAD, p.y + Y_NOTE + 2, p.w - 2 * PAD, 34)));
     }
+    v
+}
+
+fn timer_hits(c: &Cal, p: Rect, v: &mut Vec<(CHot, Rect)>) {
     v.push((CHot::Tab(Tab::Timer), Rect::new(p.x + PAD + 2, p.y + Y_TABS + 2, 96, 26)));
     v.push((CHot::Tab(Tab::Alarm), Rect::new(p.x + PAD + 100, p.y + Y_TABS + 2, 104, 26)));
     let now = Instant::now();
@@ -617,7 +627,6 @@ pub fn hits(d: &Desk, p: Rect) -> Vec<(CHot, Rect)> {
     for k in 0..n {
         v.push((CHot::Chip(k as u8), Rect::new(p.x + PAD + k * (cw + 6), p.y + Y_CHIPS, cw, 30)));
     }
-    v
 }
 
 // ------------------------------------------------------------------ input
@@ -711,7 +720,7 @@ pub fn click(d: &mut Desk, h: CHot, button: u32) {
 }
 
 /// The wheel on the flyout: over the digits it sets them, elsewhere it turns months.
-pub fn scroll(d: &mut Desk, h: Option<CHot>, value: f64) {
+pub fn scroll(d: &mut Desk, f: Fly, h: Option<CHot>, value: f64) {
     let c = &mut d.tray.cal;
     c.scroll_acc += value;
     // A notch is 10–15; touchpads send many small steps.
@@ -722,7 +731,8 @@ pub fn scroll(d: &mut Desk, h: Option<CHot>, value: f64) {
     c.scroll_acc = 0.0;
     match h {
         Some(CHot::Part(k)) => c.adjust(k, !down),
-        _ => c.month += if down { 1 } else { -1 },
+        _ if f == Fly::Calendar => c.month += if down { 1 } else { -1 },
+        _ => {}
     }
     damage(d);
 }
@@ -738,7 +748,7 @@ pub fn hover(d: &mut Desk, on: bool) -> bool {
 }
 
 /// A key while the flyout is open. True if used.
-pub fn key(d: &mut Desk, code: u32, pressed: bool) -> bool {
+pub fn key(d: &mut Desk, f: Fly, code: u32, pressed: bool) -> bool {
     use crate::input::key;
     if !pressed {
         return false;
@@ -765,9 +775,15 @@ pub fn key(d: &mut Desk, code: u32, pressed: bool) -> bool {
             crate::tray::close(d);
             return true;
         }
-        key::PAGEUP => c.month -= 1,
-        key::PAGEDOWN => c.month += 1,
-        KEY_HOME => c.month = 0,
+        key::PAGEUP if f == Fly::Calendar => c.month -= 1,
+        key::PAGEDOWN if f == Fly::Calendar => c.month += 1,
+        KEY_HOME if f == Fly::Calendar => c.month = 0,
+        key::SPACE | key::ENTER if f == Fly::Timer && c.tab == Tab::Timer => {
+            if c.ring.take().is_none() {
+                c.start_pause(Instant::now());
+            }
+            shell::damage_clocks(d);
+        }
         _ => return false,
     }
     d.seat.swallowed.push(code);
@@ -786,9 +802,9 @@ pub fn clock_line(d: &Desk) -> Option<(String, u32)> {
             };
             // Blinks with the seconds.
             let on = r.since.elapsed().as_millis() / 1000 % 2 == 0;
-            Some((t, if on { col::ACCENT } else { col::TEXT }))
+            Some((t, if on { col::accent() } else { col::TEXT }))
         }
-        (None, Run::Running(_)) => Some((format!("Таймер {}", short_time(c.timer_left(Instant::now()))), col::ACCENT)),
+        (None, Run::Running(_)) => Some((format!("Таймер {}", short_time(c.timer_left(Instant::now()))), col::accent())),
         (None, Run::Paused(_)) => Some((format!("Пауза {}", short_time(c.timer_left(Instant::now()))), col::TEXT_DIM)),
         _ => None,
     }
@@ -815,12 +831,15 @@ fn chevron(cv: &mut Canvas, clip: Rect, xf: Xf, r: Rect, right: bool) {
     cv.line(clip, phys(xf, cx + 2.5 * s, cy), phys(xf, cx - 2.5 * s, cy + 5.0), lw, col::TEXT);
 }
 
-pub fn draw(d: &Desk, p: Rect, hot: Option<CHot>, xf: Xf, cv: &mut Canvas, clip: Rect) {
+pub fn draw(d: &Desk, p: Rect, f: Fly, hot: Option<CHot>, xf: Xf, cv: &mut Canvas, clip: Rect) {
+    let hits = hits(d, p, f);
+    if f == Fly::Timer {
+        draw_timer(d, p, &hits, hot, xf, cv, clip);
+        return;
+    }
     let c = &d.tray.cal;
-    let now = Instant::now();
     let (_, _, day, mon, year) = crate::clock::local_now();
     let today_n = days_from_civil(year, mon, day);
-    let hits = hits(d, p);
     let rect_of = |h: CHot| hits.iter().find(|(x, _)| *x == h).map(|(_, r)| *r);
     let hov = |h: CHot| hot == Some(h);
     let s = xf.scale as f32;
@@ -828,7 +847,7 @@ pub fn draw(d: &Desk, p: Rect, hot: Option<CHot>, xf: Xf, cv: &mut Canvas, clip:
     // Today, in full; the month's title (both lead back to today).
     let wd = weekday(year, mon, day);
     let today = format!("{}, {} {}", WEEKDAYS[wd], day, MONTHS_GEN[mon as usize - 1]);
-    let tc = if hov(CHot::Today) && c.month != 0 { col::ACCENT } else { col::TEXT };
+    let tc = if hov(CHot::Today) && c.month != 0 { col::accent() } else { col::TEXT };
     font::draw_text_w(cv, clip, xf, p.x + PAD + 2, p.y + PAD + 18, &today, 15.0, tc, p.w - 2 * PAD, font::W::Semi);
     let (sy, sm, start) = shown(c);
     let head = format!("{} {}", MONTHS[sm as usize - 1], sy);
@@ -836,7 +855,7 @@ pub fn draw(d: &Desk, p: Rect, hot: Option<CHot>, xf: Xf, cv: &mut Canvas, clip:
         if hov(CHot::Head) {
             cv.rrect(clip, xf.r(r), xf.len(8), argb(24, 255, 255, 255));
         }
-        let hc = if hov(CHot::Head) && c.month != 0 { col::ACCENT } else { col::TEXT };
+        let hc = if hov(CHot::Head) && c.month != 0 { col::accent() } else { col::TEXT };
         font::draw_text_w(cv, clip, xf, r.x + 8, p.y + Y_HEAD + 22, &head, 14.0, hc, p.w, font::W::Semi);
     }
     for (h, right) in [(CHot::Prev, false), (CHot::Next, true)] {
@@ -873,11 +892,11 @@ pub fn draw(d: &Desk, p: Rect, hot: Option<CHot>, xf: Xf, cv: &mut Canvas, clip:
             cv.rrect(clip, xf.r(disc), xf.len(17), argb(26, 255, 255, 255));
         }
         if c.edit.as_ref().map(|e| e.0) == Some(n) {
-            cv.rrect_stroke(clip, xf.r(disc), xf.len(17), 1.5 * s, 0xa78bfa, 255, 255);
+            cv.rrect_stroke(clip, xf.r(disc), xf.len(17), 1.5 * s, (crate::look::accent() & 0xff_ffff), 255, 255);
         }
         if n == today_n {
-            cv.rrect(clip, xf.r(disc), xf.len(17), col::ACCENT);
-            tc = col::ACCENT_INK;
+            cv.rrect(clip, xf.r(disc), xf.len(17), col::accent());
+            tc = col::accent_ink();
         }
         let day = c.days.get(&n);
         if day.map_or(false, |x| x.mark) {
@@ -889,7 +908,7 @@ pub fn draw(d: &Desk, p: Rect, hot: Option<CHot>, xf: Xf, cv: &mut Canvas, clip:
         let tw = font::text_width_w(&t, 13.0, font::W::Semi);
         font::draw_text_w(cv, clip, xf, cell.x + (CW - tw) / 2, cell.y + 25, &t, 13.0, tc, CW, font::W::Semi);
         if day.map_or(false, |x| x.note.is_some()) {
-            let dc = if n == today_n { col::ACCENT_INK } else if inside { col::ACCENT } else { argb(110, 167, 139, 250) };
+            let dc = if n == today_n { col::accent_ink() } else if inside { col::accent() } else { crate::look::accent_a(110) };
             let dot = Rect::new(cell.x + CW / 2 - 2, cell.y + 30, 4, 4);
             cv.rrect(clip, xf.r(dot), xf.len(2), dc);
         }
@@ -903,7 +922,7 @@ pub fn draw(d: &Desk, p: Rect, hot: Option<CHot>, xf: Xf, cv: &mut Canvas, clip:
     if let Some((n, f)) = &c.edit {
         let r = rect_of(CHot::Note).unwrap_or(Rect::new(p.x + PAD, ny + 2, p.w - 2 * PAD, 34));
         cv.rrect(clip, xf.r(r), xf.len(10), argb(22, 255, 255, 255));
-        cv.rrect_stroke(clip, xf.r(r), xf.len(10), 1.5 * s, 0xa78bfa, 200, 200);
+        cv.rrect_stroke(clip, xf.r(r), xf.len(10), 1.5 * s, (crate::look::accent() & 0xff_ffff), 200, 200);
         if f.is_empty() {
             let ph = format!("Заметка на {}", day_name(*n));
             font::draw_text(cv, clip, xf, r.x + 12, r.y + 22, &ph, 13.0, col::TEXT_DIM, r.w - 24);
@@ -917,7 +936,15 @@ pub fn draw(d: &Desk, p: Rect, hot: Option<CHot>, xf: Xf, cv: &mut Canvas, clip:
         let t = "ПКМ по дню — отметка, СКМ — заметка";
         font::draw_text(cv, clip, xf, p.x + PAD + 2, ny + 24, t, 11.5, argb(100, 255, 255, 255), p.w - 2 * PAD);
     }
-    cv.fill(clip, xf.r(Rect::new(p.x + PAD, p.y + Y_SEP, p.w - 2 * PAD, 1)), argb(26, 255, 255, 255));
+}
+
+/// The timer's flyout: timer / alarm, the big digits, the buttons and the chips.
+fn draw_timer(d: &Desk, p: Rect, hits: &[(CHot, Rect)], hot: Option<CHot>, xf: Xf, cv: &mut Canvas, clip: Rect) {
+    let c = &d.tray.cal;
+    let now = Instant::now();
+    let rect_of = |h: CHot| hits.iter().find(|(x, _)| *x == h).map(|(_, r)| *r);
+    let hov = |h: CHot| hot == Some(h);
+    let s = xf.scale as f32;
 
     // Timer / alarm switcher, and the other one's state on the right.
     let seg = Rect::new(p.x + PAD, p.y + Y_TABS, 206, 30);
@@ -988,9 +1015,9 @@ pub fn draw(d: &Desk, p: Rect, hot: Option<CHot>, xf: Xf, cv: &mut Canvas, clip:
             (None, Run::Paused(_)) => "Дальше",
         };
         if c.ring.is_some() || c.run == Run::Idle {
-            cv.rrect(clip, xf.r(r), xf.len(10), if hov(CHot::Start) { argb(255, 186, 166, 255) } else { col::ACCENT });
+            cv.rrect(clip, xf.r(r), xf.len(10), if hov(CHot::Start) { crate::look::accent_light(0.25) } else { col::accent() });
             let tw = font::text_width_w(label, 13.0, font::W::Semi);
-            font::draw_text_w(cv, clip, xf, r.x + (r.w - tw) / 2, r.y + 22, label, 13.0, col::ACCENT_INK, r.w, font::W::Semi);
+            font::draw_text_w(cv, clip, xf, r.x + (r.w - tw) / 2, r.y + 22, label, 13.0, col::accent_ink(), r.w, font::W::Semi);
         } else {
             crate::settings::button_pub(cv, clip, xf, r, label, hov(CHot::Start));
         }
@@ -1014,12 +1041,12 @@ pub fn draw(d: &Desk, p: Rect, hot: Option<CHot>, xf: Xf, cv: &mut Canvas, clip:
     if let Some(r) = rect_of(CHot::Switch) {
         let on = c.alarm_on;
         if on {
-            cv.rrect(clip, xf.r(r), xf.len(12), if hov(CHot::Switch) { argb(255, 186, 166, 255) } else { col::ACCENT });
+            cv.rrect(clip, xf.r(r), xf.len(12), if hov(CHot::Switch) { crate::look::accent_light(0.25) } else { col::accent() });
         } else {
             cv.rrect_stroke(clip, xf.r(r), xf.len(12), 1.5 * s, 0xffffff, 150, 150);
         }
         let k = if on { Rect::new(r.x1() - 20, r.y + 4, 16, 16) } else { Rect::new(r.x + 5, r.y + 5, 14, 14) };
-        cv.rrect(clip, xf.r(k), xf.len(8), if on { col::ACCENT_INK } else { argb(200, 255, 255, 255) });
+        cv.rrect(clip, xf.r(k), xf.len(8), if on { col::accent_ink() } else { argb(200, 255, 255, 255) });
         let t = if on { "Вкл." } else { "Выкл." };
         let tw = font::text_width(t, 12.0);
         font::draw_text(cv, clip, xf, r.x - tw - 10, r.y + 17, t, 12.0, col::TEXT_DIM, 60);
@@ -1030,7 +1057,7 @@ pub fn draw(d: &Desk, p: Rect, hot: Option<CHot>, xf: Xf, cv: &mut Canvas, clip:
         let sel = c.tab == Tab::Timer && c.ring.is_none() && TIMER_PRESETS.get(k).map_or(false, |m| m * 60 == c.timer_s);
         cv.rrect(clip, xf.r(r), xf.len(15), argb(if hov(CHot::Chip(k as u8)) { 38 } else { 18 }, 255, 255, 255));
         if sel {
-            cv.rrect_stroke(clip, xf.r(r), xf.len(15), 1.5 * s, 0xa78bfa, 220, 220);
+            cv.rrect_stroke(clip, xf.r(r), xf.len(15), 1.5 * s, (crate::look::accent() & 0xff_ffff), 220, 220);
         }
         let tw = font::text_width_w(label, 12.0, font::W::Semi);
         font::draw_text_w(cv, clip, xf, r.x + (r.w - tw) / 2, r.y + 19, label, 12.0, col::TEXT, r.w, font::W::Semi);

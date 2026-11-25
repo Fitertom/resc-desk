@@ -28,6 +28,8 @@ pub enum Fly {
     Net,
     Sound,
     Calendar,
+    /// The timer and the alarm (the clock's time; the date opens the calendar).
+    Timer,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -224,13 +226,18 @@ fn net_connect(d: &mut Desk, ssid: &str, password: Option<String>) {
 
 /// The password field has the keyboard.
 pub fn wants_keys(d: &Desk) -> bool {
-    (is_open(d, Fly::Net) && d.tray.pw_for.is_some()) || is_open(d, Fly::Calendar)
+    (is_open(d, Fly::Net) && d.tray.pw_for.is_some()) || cal_fly(d).is_some()
+}
+
+/// The calendar's or the timer's flyout, if one is open (cal.rs).
+pub fn cal_fly(d: &Desk) -> Option<Fly> {
+    d.tray.fly.map(|f| f.1).filter(|f| matches!(f, Fly::Calendar | Fly::Timer))
 }
 
 /// A key while a flyout wants them. True if used.
 pub fn key(d: &mut Desk, code: u32, pressed: bool) -> bool {
-    if is_open(d, Fly::Calendar) {
-        return crate::cal::key(d, code, pressed);
+    if let Some(f) = cal_fly(d) {
+        return crate::cal::key(d, f, code, pressed);
     }
     if !pressed {
         return true;
@@ -503,7 +510,7 @@ pub fn toggle(d: &mut Desk, oi: usize, f: Fly) {
     }
     d.tray.fly = Some((oi, f));
     d.tray.hot = None;
-    if f == Fly::Calendar {
+    if matches!(f, Fly::Calendar | Fly::Timer) {
         crate::cal::opened(d);
     }
     if f == Fly::Sound {
@@ -598,6 +605,7 @@ fn lay(d: &Desk) -> Option<Lay> {
         Fly::Net => (360, net_height(d, &net_rows)),
         Fly::Sound => (360, sound_height(&d.tray.audio)),
         Fly::Calendar => (crate::cal::W, crate::cal::H),
+        Fly::Timer => (crate::cal::W, crate::cal::TIMER_H),
     };
     let x = (island.x1() - w).clamp(o.x + 8, (o.x1() - 8 - w).max(o.x + 8));
     let panel = Rect::new(x, island.y - FLY_GAP - h, w, h);
@@ -644,8 +652,8 @@ fn lay(d: &Desk) -> Option<Lay> {
             y += 12;
             hits.push((Hot::Settings, Rect::new(panel.x + 8, y, panel.w - 16, 40)));
         }
-        Fly::Calendar => {
-            hits.extend(crate::cal::hits(d, panel).into_iter().map(|(h, r)| (Hot::Cal(h), r)));
+        Fly::Calendar | Fly::Timer => {
+            hits.extend(crate::cal::hits(d, panel, f).into_iter().map(|(h, r)| (Hot::Cal(h), r)));
         }
     }
     Some(Lay { panel, hits })
@@ -757,7 +765,7 @@ pub fn release(d: &mut Desk) {
 
 pub fn hover(d: &mut Desk, x: f64, y: f64) {
     // The calendar goes away when the pointer leaves it, as Glint Calendar does.
-    if is_open(d, Fly::Calendar) && crate::cal::hover(d, contains(d, x, y)) {
+    if cal_fly(d).is_some() && crate::cal::hover(d, contains(d, x, y)) {
         close(d);
         return;
     }
@@ -773,12 +781,12 @@ pub fn scroll(d: &mut Desk, x: f64, y: f64, value: f64) -> bool {
     if value == 0.0 {
         return false;
     }
-    if is_open(d, Fly::Calendar) && contains(d, x, y) {
+    if let Some(f) = cal_fly(d).filter(|_| contains(d, x, y)) {
         let h = lay(d).and_then(|l| l.hits.into_iter().find(|(_, r)| r.contains(x, y))).and_then(|(h, _)| match h {
             Hot::Cal(c) => Some(c),
             _ => None,
         });
-        crate::cal::scroll(d, h, value);
+        crate::cal::scroll(d, f, h, value);
         return true;
     }
     let delta = if value > 0.0 { -STEP } else { STEP };
@@ -818,12 +826,12 @@ pub fn draw(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
     match f {
         Fly::Net => draw_net(d, &l, xf, cv, clip),
         Fly::Sound => draw_sound(d, &l, xf, cv, clip),
-        Fly::Calendar => {
+        Fly::Calendar | Fly::Timer => {
             let hot = match d.tray.hot {
                 Some(Hot::Cal(h)) => Some(h),
                 _ => None,
             };
-            crate::cal::draw(d, l.panel, hot, xf, cv, clip)
+            crate::cal::draw(d, l.panel, f, hot, xf, cv, clip)
         }
     }
 }
@@ -870,10 +878,10 @@ fn draw_sound(d: &Desk, l: &Lay, xf: Xf, cv: &mut Canvas, clip: Rect) {
                 let Some(s) = list.iter().find(|s| s.index == idx) else { continue };
                 let cur = Some(&s.name) == (if input { a.source() } else { a.sink() }).map(|x| &x.name);
                 let (cx, cy) = (r.x as f32 + 18.0, r.y as f32 + r.h as f32 / 2.0);
-                cv.ring(clip, phys(xf, cx, cy), 7.0 * xf.scale as f32, 1.5 * xf.scale as f32, if cur { col::ACCENT } else { col::TEXT_DIM });
+                cv.ring(clip, phys(xf, cx, cy), 7.0 * xf.scale as f32, 1.5 * xf.scale as f32, if cur { col::accent() } else { col::TEXT_DIM });
                 if cur {
                     let dot = Rect::new(cx as i32 - 3, cy as i32 - 3, 7, 7);
-                    cv.rrect(clip, xf.r(dot), xf.len(4), col::ACCENT);
+                    cv.rrect(clip, xf.r(dot), xf.len(4), col::accent());
                 }
                 let tmax = r.w - 44;
                 let name = shell::ellipsize(&s.desc, 13.0, font::W::Text, tmax);
@@ -938,7 +946,7 @@ fn draw_net(d: &Desk, l: &Lay, xf: Xf, cv: &mut Canvas, clip: Rect) {
                 let Some(a) = rows.get(i as usize) else { continue };
                 hot_bg(cv, clip, xf, r, 10, hot == Some(h) || hot == Some(Hot::Disconnect) && a.active);
                 if a.active {
-                    cv.rrect(clip, xf.r(r), xf.len(10), argb(26, 167, 139, 250));
+                    cv.rrect(clip, xf.r(r), xf.len(10), crate::look::accent_a(26));
                 }
                 draw_wifi(cv, clip, xf, r.x as f32 + 20.0, r.y as f32 + r.h as f32 / 2.0 - 1.0, bars(a.strength), false, col::TEXT);
                 let tmax = r.w - 44 - if a.active { 110 } else { 30 };
@@ -966,7 +974,7 @@ fn draw_net(d: &Desk, l: &Lay, xf: Xf, cv: &mut Canvas, clip: Rect) {
             }
             Hot::PwField => {
                 cv.rrect(clip, xf.r(r), xf.len(10), argb(22, 255, 255, 255));
-                cv.rrect_stroke(clip, xf.r(r), xf.len(10), 1.5 * xf.scale as f32, 0xa78bfa, 200, 200);
+                cv.rrect_stroke(clip, xf.r(r), xf.len(10), 1.5 * xf.scale as f32, (crate::look::accent() & 0xff_ffff), 200, 200);
                 let n = d.tray.pw.text().chars().count();
                 if n == 0 {
                     font::draw_text(cv, clip, xf, r.x + 12, r.y + 22, "Пароль", 13.0, col::TEXT_DIM, r.w - 20);

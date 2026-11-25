@@ -2845,8 +2845,13 @@ pub fn run(args: &[String]) -> i32 {
         } else if app.ops_busy() || app.searching || app.rename_at.is_some() || app.search_at.is_some() || app.reload_at.is_some() || app.props_rx.is_some() || app.hash_rx.is_some() || app.toast.is_some() || app.press.as_ref().map_or(false, |p| p.dragging) || app.incoming.is_some() {
             100
         } else {
-            -1
+            // Now and then: the look (the ambient color with the wallpaper) may change.
+            1000
         };
+        if crate::look::poll() {
+            crate::icons::reset();
+            app.dirty = true;
+        }
         let evs = match win.poll(wait) {
             Ok(e) => e,
             Err(e) => {

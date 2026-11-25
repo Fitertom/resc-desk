@@ -355,7 +355,7 @@ pub fn draw(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
                 cv.rrect_stroke(clip, xf.r(m), xf.len(2), xf.scale as f32, 0xffffff, 60, 40);
             }
         }
-        let ring = if cur { (0xa78bfa, 255) } else if hot { (0xffffff, 120) } else { (0xffffff, 40) };
+        let ring = if cur { ((crate::look::accent() & 0xff_ffff), 255) } else if hot { (0xffffff, 120) } else { (0xffffff, 40) };
         cv.rrect_stroke(clip, xf.r(t.inflate(2)), xf.len(10), if cur { 2.5 } else { 1.5 } * xf.scale as f32, ring.0, ring.1, ring.1);
         let name = format!("Рабочий стол {}", i + 1);
         let tw = font::text_width_w(&name, 12.5, font::W::Semi);

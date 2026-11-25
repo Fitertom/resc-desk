@@ -28,9 +28,14 @@ pub mod col {
     /// white at 0.55 (premultiplied)
     pub const TEXT_DIM: u32 = argb(140, 255, 255, 255);
     pub const CLOSE_HOVER: u32 = 0xffe1_3b3b;
-    pub const ACCENT: u32 = 0xffa7_8bfa;
+    /// The ambient color (look.rs: the wallpaper's own).
+    pub fn accent() -> u32 {
+        crate::look::accent()
+    }
     /// text on the accent
-    pub const ACCENT_INK: u32 = 0xff15_101f;
+    pub fn accent_ink() -> u32 {
+        crate::look::accent_ink()
+    }
 }
 
 // ------------------------------------------------------------------ background
@@ -343,12 +348,21 @@ fn taskview_button(d: &Desk) -> bool {
 /// The flyout the right island's item under (`x`, `y`) opens, if any.
 pub fn tray_item_at(d: &Desk, x: f64, y: f64) -> Option<crate::tray::Fly> {
     let oi = d.output_at(x, y)?;
-    taskbar_layout(d, oi).into_iter().find(|(_, r)| r.contains(x, y)).and_then(|(i, _)| match i {
+    taskbar_layout(d, oi).into_iter().find(|(_, r)| r.contains(x, y)).and_then(|(i, r)| match i {
         TbItem::Net => Some(crate::tray::Fly::Net),
         TbItem::Sound => Some(crate::tray::Fly::Sound),
-        TbItem::Clock => Some(crate::tray::Fly::Calendar),
+        TbItem::Clock => Some(clock_fly(r, y)),
         _ => None,
     })
+}
+
+/// The clock's two lines open two flyouts: the time the timer, the date the calendar.
+pub fn clock_fly(r: Rect, y: f64) -> crate::tray::Fly {
+    if y < (r.y + 23) as f64 {
+        crate::tray::Fly::Timer
+    } else {
+        crate::tray::Fly::Calendar
+    }
 }
 
 pub fn taskbar_contains(d: &Desk, x: f64, y: f64) -> bool {
@@ -637,8 +651,11 @@ pub fn draw_taskbar(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
                 }
             }
             TbItem::Clock => {
-                if crate::tray::is_open(d, crate::tray::Fly::Calendar) {
-                    cv.rrect(clip, xf.r(r), xf.len(12), argb(22, 255, 255, 255));
+                // The half whose flyout is open (the time: the timer, the date: the calendar).
+                for (f, part) in [(crate::tray::Fly::Timer, Rect::new(r.x, r.y, r.w, 23)), (crate::tray::Fly::Calendar, Rect::new(r.x, r.y + 23, r.w, r.h - 23))] {
+                    if crate::tray::is_open(d, f) {
+                        cv.rrect(clip, xf.r(part), xf.len(10), argb(22, 255, 255, 255));
+                    }
                 }
                 let (hh, mm, day, mon, year) = crate::clock::local_now();
                 let t = format!("{hh:02}:{mm:02}");
@@ -656,8 +673,8 @@ pub fn draw_taskbar(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
     if let Some((_, r)) = lay.iter().find(|(i, _)| matches!(i, TbItem::Win(k) if Some(*k) == focused)) {
         let cx = if anim.focus.init { anim.focus.x.round() as i32 } else { r.x + r.w / 2 };
         let bar = Rect::new(cx - 8, r.y1() - 3, 16, 3);
-        cv.rrect(clip, xf.r(bar.inflate(2)), xf.len(3), argb(60, 167, 139, 250));
-        cv.rrect(clip, xf.r(bar), xf.len(1), col::ACCENT);
+        cv.rrect(clip, xf.r(bar.inflate(2)), xf.len(3), crate::look::accent_a(60));
+        cv.rrect(clip, xf.r(bar), xf.len(1), col::accent());
     }
 }
 
@@ -673,10 +690,10 @@ fn draw_taskview_icon(cv: &mut Canvas, clip: Rect, xf: Xf, r: Rect, desktops: u3
     cv.rrect_stroke(clip, xf.r(front), xf.len(3), w, 0xffffff, 255, 255);
     if desktops > 1 {
         let b = Rect::new(r.x1() - 15, r.y + 4, 13, 13);
-        cv.rrect(clip, xf.r(b), xf.len(7), col::ACCENT);
+        cv.rrect(clip, xf.r(b), xf.len(7), col::accent());
         let s = format!("{}", desktops.min(9));
         let tw = font::text_width_w(&s, 9.5, font::W::Bold);
-        font::draw_text_w(cv, clip, xf, b.x + (b.w - tw) / 2 + 1, b.y + 10, &s, 9.5, col::ACCENT_INK, b.w, font::W::Bold);
+        font::draw_text_w(cv, clip, xf, b.x + (b.w - tw) / 2 + 1, b.y + 10, &s, 9.5, col::accent_ink(), b.w, font::W::Bold);
     }
 }
 
@@ -686,7 +703,7 @@ fn draw_logo(cv: &mut Canvas, clip: Rect, xf: Xf, r: Rect) {
     let s = 9;
     let cells = [(-s - 1, -s - 1, 0u32, 3), (1, -s - 1, 110, s / 2), (-s - 1, 1, 110, 3), (1, 1, 200, 3)];
     for (dx, dy, t, rad) in cells {
-        let c = crate::render::lerp(0xfff4_f0ff, col::ACCENT, t);
+        let c = crate::render::lerp(0xfff4_f0ff, col::accent(), t);
         cv.rrect(clip, xf.r(Rect::new(cx + dx, cy + dy, s, s)), xf.len(rad), c);
     }
 }
@@ -714,7 +731,7 @@ pub fn taskbar_click(d: &mut Desk, x: f64, y: f64, button: u32) -> bool {
             TbItem::Net => crate::tray::toggle(d, oi, crate::tray::Fly::Net),
             TbItem::Sound if button == crate::input::BTN_MIDDLE => crate::tray::toggle_mute(d, false),
             TbItem::Sound => crate::tray::toggle(d, oi, crate::tray::Fly::Sound),
-            TbItem::Clock => crate::tray::toggle(d, oi, crate::tray::Fly::Calendar),
+            TbItem::Clock => crate::tray::toggle(d, oi, clock_fly(r, y)),
             TbItem::Launch(_) | TbItem::Ghost(_) => {}
             TbItem::Win(wk) => {
                 close_menus(d);
@@ -1465,7 +1482,7 @@ fn draw_switcher(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
         let tile = cell.inflate(3);
         cv.rrect(clip, xf.r(tile), xf.len(14), if i == *sel { argb(30, 255, 255, 255) } else { argb(12, 255, 255, 255) });
         if i == *sel {
-            cv.rrect_stroke(clip, xf.r(tile), xf.len(14), 2.0 * xf.scale as f32, 0xa78bfa, 255, 255);
+            cv.rrect_stroke(clip, xf.r(tile), xf.len(14), 2.0 * xf.scale as f32, (crate::look::accent() & 0xff_ffff), 255, 255);
         }
         let t = if w.title.is_empty() { &w.app_id } else { &w.title };
         draw_app_tile(cv, clip, xf, Rect::new(cell.x + 6, cell.y + 5, 18, 18), &w.app_id, &w.title);
@@ -1497,9 +1514,9 @@ fn draw_calibration(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
     let mm_y1 = (o.plane[1] + o.plane[3]).ceil() as i64;
     let line = |m: i64| -> Option<u32> {
         if m % 100 == 0 {
-            Some(argb(230, 167, 139, 250))
+            Some(crate::look::accent_a(230))
         } else if m % 50 == 0 {
-            Some(argb(150, 167, 139, 250))
+            Some(crate::look::accent_a(150))
         } else if m % 10 == 0 {
             Some(argb(45, 255, 255, 255))
         } else {
@@ -1561,16 +1578,16 @@ fn draw_calibration(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
         Rect::new(card.x, card.y, t, card.h),
         Rect::new(card.x1() - t, card.y, t, card.h),
     ] {
-        cv.fill(clip, e, col::ACCENT);
+        cv.fill(clip, e, col::accent());
     }
     let (clx, cly) = ((ccx - 40.0 - mx) * k, (ccy + 2.0 - my) * k);
-    font::draw_text(cv, clip, xf, clx as i32, cly as i32, "банковская карта 85.6 × 54 мм", 11.0, col::ACCENT, 400);
+    font::draw_text(cv, clip, xf, clx as i32, cly as i32, "банковская карта 85.6 × 54 мм", 11.0, col::accent(), 400);
     // Info + help.
     let sel = cal.sel == oi;
     if sel {
         let b = xf.len(4).max(3);
         for e in [Rect::new(pr.x, pr.y, pr.w, b), Rect::new(pr.x, pr.y1() - b, pr.w, b), Rect::new(pr.x, pr.y, b, pr.h), Rect::new(pr.x1() - b, pr.y, b, pr.h)] {
-            cv.fill(clip, e, col::ACCENT);
+            cv.fill(clip, e, col::accent());
         }
     }
     let lines = [
@@ -1597,8 +1614,8 @@ pub fn draw_overlays(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
     }
     if let Some(r) = d.overlay.snap_preview {
         if r.overlaps(&d.outputs[oi].rect()) {
-            cv.rrect(clip, xf.r(r), xf.len(14), argb(46, 167, 139, 250));
-            cv.rrect_stroke(clip, xf.r(r), xf.len(14), 1.5 * xf.scale as f32, 0xa78bfa, 200, 140);
+            cv.rrect(clip, xf.r(r), xf.len(14), crate::look::accent_a(46));
+            cv.rrect_stroke(clip, xf.r(r), xf.len(14), 1.5 * xf.scale as f32, (crate::look::accent() & 0xff_ffff), 200, 140);
         }
     }
     if glass_on_gpu() {

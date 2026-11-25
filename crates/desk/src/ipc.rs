@@ -245,6 +245,17 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             d.damage_all();
             crate::layout::save_config(d).map_err(|e| e.to_string())?;
         }
+        // glass-place PLACE DIM BLUR BEZEL: one glass place's look (look.rs).
+        "glass-place" => {
+            let usage = "glass-place files|settings|calendar|timer|windows DIM(0..1) BLUR(px) BEZEL(px)";
+            let p = crate::look::Place::from_key(arg(0)?).ok_or(usage)?;
+            let num = |i: usize| rest.get(i).and_then(|v| v.parse::<f32>().ok()).ok_or(usage.to_string());
+            crate::look::set_glass(p, crate::look::Glass { dim: num(1)?, blur: num(2)?, bezel: num(3)? });
+            crate::look::publish();
+            d.damage_all();
+            crate::layout::save_config(d).map_err(|e| e.to_string())?;
+            out.push_str("ok\n");
+        }
         // bezel PANELS [WINDOWS]: the glass's bezel width, CSS px.
         "bezel" => {
             let num = |i: usize| rest.get(i).and_then(|v| v.parse::<f32>().ok());
@@ -278,6 +289,11 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             out.push_str(&format!("bezel {} {} {}
 ", crate::glass::bezel(), crate::glass::win_bezel(), crate::glass::MAX_BEZEL));
             out.push_str(&format!("anim {} {}\n", d.display_cfg.anim_launch, d.display_cfg.anim_close));
+            out.push_str(&format!("accent {:06x}\n", crate::look::accent() & 0xff_ffff));
+            for p in crate::look::PLACES {
+                let g = crate::look::glass(p);
+                out.push_str(&format!("place {} {} {} {}\n", p.key(), g.dim, g.blur, g.bezel));
+            }
             out.push_str(&format!("ui_scale {}
 ", d.display_cfg.ui_scale));
             out.push_str(&format!("wallpaper {}

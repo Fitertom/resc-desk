@@ -277,7 +277,7 @@ fn draw_cell(d: &Desk, cv: &mut Canvas, clip: Rect, xf: Xf, cell: Rect, app: usi
         cv.rrect(clip, xf.r(cell.inflate(-3)), xf.len(12), argb(22, 255, 255, 255));
     }
     if sel {
-        cv.rrect_stroke(clip, xf.r(cell.inflate(-3)), xf.len(12), 1.5 * sc, 0xa78bfa, 200, 200);
+        cv.rrect_stroke(clip, xf.r(cell.inflate(-3)), xf.len(12), 1.5 * sc, (crate::look::accent() & 0xff_ffff), 200, 200);
     }
     let a = &d.apps[app];
     let icon = Rect::new(cell.x + (cell.w - 40) / 2, cell.y + 10, 40, 40);
@@ -303,7 +303,7 @@ pub fn draw(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
     draw_search(d, sb, xf, cv, clip);
     draw_content(d, oi, xf, cv, clip);
     let av = avatar_rect(r);
-    cv.rrect(clip, xf.r(av), xf.len(15), col::ACCENT);
+    cv.rrect(clip, xf.r(av), xf.len(15), col::accent());
     draw_initial(cv, clip, xf, av);
     draw_user(cv, clip, xf, av.x1() + 12, av.y + 20);
     draw_footer_buttons(d, oi, xf, cv, clip, true);
@@ -335,7 +335,7 @@ pub fn draw_user(cv: &mut Canvas, clip: Rect, xf: Xf, x: i32, y: i32) {
 pub fn draw_initial(cv: &mut Canvas, clip: Rect, xf: Xf, av: Rect) {
     let ini: String = user_name().chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
     let iw = font::text_width_w(&ini, 13.0, font::W::Bold);
-    font::draw_text_w(cv, clip, xf, av.x + (av.w - iw) / 2, av.y + av.h / 2 + 5, &ini, 13.0, col::ACCENT_INK, av.w.max(1), font::W::Bold);
+    font::draw_text_w(cv, clip, xf, av.x + (av.w - iw) / 2, av.y + av.h / 2 + 5, &ini, 13.0, col::accent_ink(), av.w.max(1), font::W::Bold);
 }
 
 /// Gear and power: their glyphs, lit when hovered (power also while its menu is open), with
@@ -417,7 +417,7 @@ pub fn draw_content(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
                         draw_cell(d, cv, gclip, xf, *cell, *a, hot(i), sel_item == Some(i));
                         if d.start.prefs.pinned.iter().any(|p| *p == d.apps[*a].id) {
                             let dot = Rect::new(cell.x1() - 22, cell.y + 10, 6, 6);
-                            cv.rrect(gclip, xf.r(dot), xf.len(3), col::ACCENT);
+                            cv.rrect(gclip, xf.r(dot), xf.len(3), col::accent());
                         }
                     }
                 }
@@ -453,7 +453,7 @@ pub fn draw_content(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
                         cv.rrect(clip, xf.r(*cell), xf.len(12), argb(22, 255, 255, 255));
                     }
                     if sel_item == Some(i) {
-                        cv.rrect_stroke(clip, xf.r(*cell), xf.len(12), 1.5 * sc, 0xa78bfa, 200, 200);
+                        cv.rrect_stroke(clip, xf.r(*cell), xf.len(12), 1.5 * sc, (crate::look::accent() & 0xff_ffff), 200, 200);
                     }
                     let app = &d.apps[*a];
                     let ic = Rect::new(cell.x + 10, cell.y + 7, 34, 34);

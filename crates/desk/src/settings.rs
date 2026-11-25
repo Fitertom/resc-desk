@@ -29,9 +29,11 @@ const NAV_H: i32 = 40;
 const BTN_W: i32 = 132;
 const BTN_H: i32 = 32;
 const TOP: i32 = 78;
-/// Liquify's accent (kit.rs ACCENT, 0xa78bfa).
-const ACCENT: [f32; 3] = [167.0 / 255.0, 139.0 / 255.0, 250.0 / 255.0];
-const ACCENT_U32: u32 = 0xffa7_8bfa;
+/// The ambient color (look.rs: the wallpaper's, as Liquify takes a cover's), straight RGB.
+fn accent_rgb() -> [f32; 3] {
+    let c = crate::look::accent();
+    [(c >> 16 & 255) as f32 / 255.0, (c >> 8 & 255) as f32 / 255.0, (c & 255) as f32 / 255.0]
+}
 
 const UI_MIN: f64 = 0.75;
 const UI_MAX: f64 = 2.5;
@@ -43,14 +45,16 @@ const KEY_DOWN: u32 = 108;
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
     Look,
+    Glass,
     Wallpaper,
     Displays,
     Sound,
     About,
 }
 
-const PAGES: [(Page, &str, &str); 5] = [
+const PAGES: [(Page, &str, &str); 6] = [
     (Page::Look, "Оформление", "preferences-desktop-theme"),
+    (Page::Glass, "Стекло", "preferences-desktop-effects;preferences-system-windows;preferences-desktop-theme"),
     (Page::Wallpaper, "Обои", "preferences-desktop-wallpaper;preferences-desktop-background"),
     (Page::Displays, "Мониторы", "preferences-desktop-display"),
     (Page::Sound, "Звук", "preferences-desktop-sound;audio-volume-high;multimedia-volume-control"),
@@ -80,6 +84,10 @@ enum Sl {
     UiScale,
     OutVol,
     InVol,
+    /// The chosen glass place's dim, blur and edge.
+    PDim,
+    PBlur,
+    PBezel,
 }
 
 /// A choice of one among a few (life.rs: how programs start and windows close).
@@ -87,6 +95,8 @@ enum Sl {
 enum Ch {
     Launch,
     Close,
+    /// Which glass place the sliders below set.
+    Place,
 }
 
 impl Ch {
@@ -94,6 +104,7 @@ impl Ch {
         match self {
             Ch::Launch => &["Из кнопки на панели задач", "Из значка, по которому кликнули"],
             Ch::Close => &["Втягивается в кнопку, кнопка лопается", "Сжимается в каплю и испаряется", "Втягивается в ✕"],
+            Ch::Place => &["Проводник", "Параметры", "Календарь", "Таймер", "Заголовки остальных окон"],
         }
     }
 
@@ -147,6 +158,8 @@ struct Model {
     anim_close: usize,
     /// The current wallpaper (None: the built-in one).
     wallpaper: Option<String>,
+    /// Each glass place's dim, blur and edge (look.rs PLACES order).
+    places: [[f32; 3]; 5],
     renderer: String,
     session: String,
     outputs: Vec<Out>,
@@ -178,6 +191,11 @@ fn fetch() -> Model {
                 m.max_bezel = (f(2) as f32).max(1.0);
             }
             "ui_scale" => m.ui_scale = f(0),
+            "place" if n.len() >= 4 => {
+                if let Some(i) = crate::look::PLACES.iter().position(|p| p.key() == n[0]) {
+                    m.places[i] = [f(1) as f32, f(2) as f32, f(3) as f32];
+                }
+            }
             "anim" => {
                 m.anim_launch = f(0) as usize;
                 m.anim_close = f(1) as usize;
@@ -289,7 +307,9 @@ struct App {
     /// The chosen output (0) and input (1) device, flowing between rows.
     devs: [Option<Drop>; 2],
     /// The chosen option of each `Ch`, flowing between rows.
-    chs: [Option<Drop>; 2],
+    chs: [Option<Drop>; 3],
+    /// The glass place the «Стекло» page sets.
+    place: usize,
     /// A page coming in: 0 → 1 (the cards fade in rising a little).
     page_t: Spring,
     /// The slider being dragged and its value (sent on release).
@@ -464,7 +484,25 @@ impl App {
         match ch {
             Ch::Launch => self.m.anim_launch,
             Ch::Close => self.m.anim_close,
+            Ch::Place => self.place,
         }
+    }
+
+    /// The chosen glass place's value `i` (0 dim, 1 blur, 2 edge), the dragged one live.
+    fn pval(&self, i: usize) -> f32 {
+        let sl = [Sl::PDim, Sl::PBlur, Sl::PBezel][i];
+        if self.drag == Some(sl) {
+            self.drag_val as f32
+        } else {
+            self.m.places[self.place][i]
+        }
+    }
+
+    /// Tells the compositor the chosen place's glass, `i` being `v` now.
+    fn send_place(&mut self, i: usize, v: f32) {
+        self.m.places[self.place][i] = v;
+        let [dim, blur, bezel] = self.m.places[self.place];
+        send(&format!("glass-place {} {dim} {blur} {bezel}", crate::look::PLACES[self.place].key()));
     }
 
     fn devices(&self, input: bool) -> &[crate::pulse::Device] {
@@ -495,6 +533,9 @@ impl App {
             Sl::WinBezel => self.win_bezel() / self.m.max_bezel.max(1.0),
             Sl::UiScale => ((self.ui_scale() - UI_MIN) / (UI_MAX - UI_MIN)) as f32,
             Sl::OutVol | Sl::InVol => self.vol(sl == Sl::InVol) / crate::pulse::MAX_PERCENT as f32,
+            Sl::PDim => self.pval(0) / crate::look::MAX_DIM,
+            Sl::PBlur => self.pval(1) / crate::look::MAX_BLUR,
+            Sl::PBezel => self.pval(2) / crate::look::MAX_BEZEL,
         }
         .clamp(0.0, 1.0)
     }
@@ -507,7 +548,7 @@ impl App {
             let muted = self.sound_dev(input).map_or(false, |d| d.mute);
             self.anims.drive(AK::Switch(sw), on(muted), SPR_SWITCH);
         }
-        for sl in [Sl::Blur, Sl::Bezel, Sl::WinBezel, Sl::UiScale, Sl::OutVol, Sl::InVol] {
+        for sl in [Sl::Blur, Sl::Bezel, Sl::WinBezel, Sl::UiScale, Sl::OutVol, Sl::InVol, Sl::PDim, Sl::PBlur, Sl::PBezel] {
             let k = self.slider_k(sl);
             self.anims.drive(AK::Slider(sl), k, if self.drag == Some(sl) { SPR_DRAG } else { SPR_SLIDE });
         }
@@ -521,7 +562,7 @@ impl App {
         self.anims.drive(AK::Btn, on(self.hot == Some(100)), SPR_HOVER);
         let l = self.layout();
         let under = |r: Rect, ptr: Option<(f64, f64)>| ptr.map_or(false, |(x, y)| r.contains(x, y) && l.view.contains(x, y));
-        for ch in [Ch::Launch, Ch::Close] {
+        for ch in [Ch::Launch, Ch::Close, Ch::Place] {
             let Some(row) = l.rows.iter().find(|r| r.ctl == Ctl::Choice(ch)) else { continue };
             let hots: Vec<bool> = (0..ch.options().len()).map(|i| under(dev_rect(row.at, i), self.ptr)).collect();
             for (i, hot) in hots.into_iter().enumerate() {
@@ -621,6 +662,33 @@ impl App {
                     Ctl::Choice(Ch::Launch),
                 ));
                 v.push(("Закрытие окна".into(), String::new(), "Как уходит закрытое окно".into(), Ctl::Choice(Ch::Close)));
+            }
+            Page::Glass => {
+                v.push((
+                    "Цвет акцента".into(),
+                    format!("#{:06x}", crate::look::accent() & 0xff_ffff),
+                    "Берётся из обоев, как в Liquify из обложки: средний цвет картинки, ярче и насыщеннее. В него окрашены папки, выделение и кнопки".into(),
+                    Ctl::None,
+                ));
+                v.push((
+                    "Где".into(),
+                    String::new(),
+                    "У каждого места со стеклом свои затемнение, размытие и край. Меню, панель задач и «Пуск» — на странице «Оформление»".into(),
+                    Ctl::Choice(Ch::Place),
+                ));
+                v.push((
+                    "Затемнение".into(),
+                    format!("{:.0} %", self.pval(0) * 100.0),
+                    "Насколько тёмное стекло: 0 — прозрачное, 100 — сплошной тёмный фон".into(),
+                    Ctl::Slider(Sl::PDim),
+                ));
+                v.push(("Размытие".into(), format!("{:.0}px", self.pval(1)), "Как сильно размыто то, что под стеклом. 0 — не размыто".into(), Ctl::Slider(Sl::PBlur)));
+                v.push((
+                    "Край стекла".into(),
+                    format!("{:.0}px", self.pval(2)),
+                    "Ширина полосы вдоль края, где стекло скругляется и преломляет: чем шире, тем сильнее линза".into(),
+                    Ctl::Slider(Sl::PBezel),
+                ));
             }
             Page::Displays => {
                 for o in &m.outputs {
@@ -793,7 +861,23 @@ impl App {
             }
             Sl::UiScale => ((UI_MIN + k * (UI_MAX - UI_MIN)) / UI_STEP).round() * UI_STEP,
             Sl::OutVol | Sl::InVol => (k * crate::pulse::MAX_PERCENT as f64).round(),
+            Sl::PDim => (k * 20.0).round() / 20.0,
+            Sl::PBlur => {
+                let step = crate::glass::BLUR_STEP as f64;
+                (k * crate::look::MAX_BLUR as f64 / step).round() * step
+            }
+            Sl::PBezel => {
+                let step = crate::glass::BEZEL_STEP as f64;
+                (k * crate::look::MAX_BEZEL as f64 / step).round() * step
+            }
         };
+        // Glass follows the slider at once.
+        if let Some(i) = [Sl::PDim, Sl::PBlur, Sl::PBezel].iter().position(|s| *s == sl) {
+            let v = self.drag_val as f32;
+            if (self.m.places[self.place][i] - v).abs() > 1e-4 {
+                self.send_place(i, v);
+            }
+        }
         // Volume follows the slider at once.
         if matches!(sl, Sl::OutVol | Sl::InVol) {
             let input = sl == Sl::InVol;
@@ -845,8 +929,11 @@ impl App {
                     match ch {
                         Ch::Launch => self.m.anim_launch = i,
                         Ch::Close => self.m.anim_close = i,
+                        Ch::Place => self.place = i,
                     }
-                    send(&format!("anim {} {i}", if ch == Ch::Launch { "launch" } else { "close" }));
+                    if ch != Ch::Place {
+                        send(&format!("anim {} {i}", if ch == Ch::Launch { "launch" } else { "close" }));
+                    }
                 }
             }
             Ctl::Devices(input) => {
@@ -890,6 +977,7 @@ impl App {
                 }
             }
             Some(Sl::OutVol | Sl::InVol) => self.sound_refresh(),
+            Some(Sl::PDim | Sl::PBlur | Sl::PBezel) => {}
             Some(Sl::UiScale) => {
                 if (self.drag_val - self.m.ui_scale).abs() > 1e-9 {
                     self.m.ui_scale = self.drag_val;
@@ -933,6 +1021,7 @@ pub fn run(args: &[String]) -> i32 {
         Some("about") => Page::About,
         Some("sound") => Page::Sound,
         Some("wallpaper") | Some("wallpapers") => Page::Wallpaper,
+        Some("glass") => Page::Glass,
         _ => Page::Look,
     };
     crate::font::init();
@@ -950,7 +1039,8 @@ pub fn run(args: &[String]) -> i32 {
         anims: Anims::default(),
         nav: Drop::at(PAGES.iter().position(|p| p.0 == page).unwrap_or(0) as f32),
         devs: [None, None],
-        chs: [None, None],
+        chs: [None, None, None],
+        place: 0,
         page_t: Spring::new(1.0, 0.32, 1.0),
         drag: None,
         drag_val: 0.0,
@@ -981,7 +1071,7 @@ pub fn run(args: &[String]) -> i32 {
         } else if app.page == Page::Sound {
             300
         } else {
-            -1
+            1000
         };
         let evs = match win.poll(wait) {
             Ok(e) => e,
@@ -1030,6 +1120,10 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
         if app.walls_poll() && app.page == Page::Wallpaper {
+            dirty = true;
+        }
+        if crate::look::poll() {
+            crate::icons::reset();
             dirty = true;
         }
         if app.page == Page::Sound && app.sound_poll() {
@@ -1169,7 +1263,7 @@ fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 pub(crate) fn switch(cv: &mut Canvas, clip: Rect, xf: Xf, x: f32, y: f32, t: f32, v: f32) {
     let s = xf.scale as f32;
     let (ox, oy) = (xf.fx(x as f64) as f32, xf.fy(y as f64) as f32);
-    let accent = rgba(ACCENT[0], ACCENT[1], ACCENT[2], 1.0);
+    let accent = { let a = accent_rgb(); rgba(a[0], a[1], a[2], 1.0) };
     let track = Look { fill: mix(white(0.16), accent, t), shadow: None, highlight: 0.0, border: None };
     draw_box(cv, clip, FBox { x: ox, y: oy, w: SWITCH_W * s, h: SWITCH_H * s, r: 13.0 * s }, &track, s);
     let stretch = (v.abs() * 1.6).min(9.0);
@@ -1192,7 +1286,7 @@ pub(crate) fn slider(cv: &mut Canvas, clip: Rect, xf: Xf, bar: Rect, k: f32) {
     let flat = |fill| Look { fill, shadow: None, highlight: 0.0, border: None };
     draw_box(cv, clip, FBox { x: ox, y: oy + ty * s, w: iw * s, h: 4.0 * s, r: 2.0 * s }, &flat(white(0.12)), s);
     if k > 0.0 {
-        let accent = rgba(ACCENT[0], ACCENT[1], ACCENT[2], 1.0);
+        let accent = { let a = accent_rgb(); rgba(a[0], a[1], a[2], 1.0) };
         draw_box(cv, clip, FBox { x: ox, y: oy + ty * s, w: iw * k * s, h: 4.0 * s, r: 2.0 * s }, &flat(accent), s);
     }
     let kx = (iw * k - SLIDER_KNOB * 0.5).clamp(0.0, iw - SLIDER_KNOB);
@@ -1234,6 +1328,7 @@ fn button(cv: &mut Canvas, clip: Rect, xf: Xf, r: Rect, label: &str, hot: f32) {
 /// (a light violet-black veil with the accent glowing from the top left). Without glass the
 /// compositor puts its solid frame colour under it.
 fn background(cv: &mut Canvas, w: i32, h: i32) {
+    let ac = accent_rgb();
     let (gx, gy, gr) = (w as f32 * 0.15, -(h as f32) * 0.1, (w.max(h) as f32) * 0.9);
     for y in 0..h {
         let row = y as usize * cv.stride;
@@ -1244,10 +1339,11 @@ fn background(cv: &mut Canvas, w: i32, h: i32) {
             let g = (1.0 - (dx * dx + dy * dy).sqrt() / gr).max(0.0);
             let g = g * g * 0.16;
             // Premultiplied: a dark veil of alpha `a` plus the accent glow.
-            let a = 0.30 + 0.08 * t + g;
-            let r = 14.0 * 0.30 + g * 167.0;
-            let gg = 12.0 * 0.30 + g * 139.0;
-            let b = 20.0 * 0.30 + g * 250.0;
+            // (The window's darkness is its glass's: «Стекло» → «Параметры».)
+            let a = 0.10 + 0.06 * t + g;
+            let r = 14.0 * 0.10 + g * ac[0] * 255.0;
+            let gg = 12.0 * 0.10 + g * ac[1] * 255.0;
+            let b = 20.0 * 0.10 + g * ac[2] * 255.0;
             let q = |v: f32| (v.round() as u32).min(255);
             cv.px[row + x as usize] = q(a * 255.0) << 24 | q(r) << 16 | q(gg) << 8 | q(b);
         }
@@ -1281,9 +1377,9 @@ fn draw(app: &App, cv: &mut Canvas) {
         let y1 = n0.y as f32 + app.nav.right.value * step - 4.0;
         let sel = Rect::from_edges(n0.x, y0.round() as i32, n0.x1(), y1.round() as i32);
         if sel.h > 0 {
-            cv.rrect(clip, xf.r(sel), xf.len(10), argb(34, 167, 139, 250));
+            cv.rrect(clip, xf.r(sel), xf.len(10), crate::look::accent_a(34));
             let bar = (sel.h - 22).max(4);
-            cv.rrect(clip, xf.r(Rect::new(sel.x, sel.y + (sel.h - bar) / 2, 3, bar)), xf.len(1), ACCENT_U32);
+            cv.rrect(clip, xf.r(Rect::new(sel.x, sel.y + (sel.h - bar) / 2, 3, bar)), xf.len(1), crate::look::accent());
         }
     }
     for (i, r) in l.nav.iter().enumerate() {
@@ -1336,7 +1432,7 @@ fn draw_page(app: &App, cv: &mut Canvas, l: &Layout) {
         font::draw_text_w(cv, vclip, xf, tx, c.y + CARD_PAD + 15, &row.name, 15.0, text_color(1.0), text_w, font::W::Semi);
         if !row.value.is_empty() {
             let vw = font::text_width_w(&row.value, 14.0, font::W::Bold);
-            font::draw_text_w(cv, vclip, xf, c.x1() - CARD_PAD - vw, c.y + CARD_PAD + 15, &row.value, 14.0, ACCENT_U32, vw + 4, font::W::Bold);
+            font::draw_text_w(cv, vclip, xf, c.x1() - CARD_PAD - vw, c.y + CARD_PAD + 15, &row.value, 14.0, crate::look::accent(), vw + 4, font::W::Bold);
         }
         for (i, line) in row.desc.iter().enumerate() {
             font::draw_text(cv, vclip, xf, tx, c.y + CARD_PAD + 20 + 3 + 13 + i as i32 * DESC_LINE, line, 13.0, text_color(0.55), text_w);
@@ -1361,17 +1457,17 @@ fn draw_page(app: &App, cv: &mut Canvas, l: &Layout) {
                     let y1 = row.at.y as f32 + d.right.value * DEV_ROW as f32 - 4.0;
                     let sel = Rect::from_edges(r0.x, y0.round() as i32, r0.x1(), y1.round() as i32);
                     if sel.h > 0 {
-                        cv.rrect(vclip, xf.r(sel), xf.len(10), argb(30, 167, 139, 250));
+                        cv.rrect(vclip, xf.r(sel), xf.len(10), crate::look::accent_a(30));
                     }
                 }
                 for (i, name) in opts.iter().enumerate() {
                     let r = dev_rect(row.at, i);
                     let c = drop.map_or(0.0, |d| d.cover(i));
                     let (cx, cy) = (r.x as f32 + 20.0, r.y as f32 + r.h as f32 / 2.0);
-                    cv.ring(vclip, crate::shell::phys(xf, cx, cy), 7.0, 1.5, lerp_argb(text_color(0.5), ACCENT_U32, c));
+                    cv.ring(vclip, crate::shell::phys(xf, cx, cy), 7.0, 1.5, lerp_argb(text_color(0.5), crate::look::accent(), c));
                     let dot = (7.0 * c).round() as i32;
                     if dot >= 1 {
-                        cv.rrect(vclip, xf.r(Rect::new(cx as i32 - dot / 2, cy as i32 - dot / 2, dot, dot)), xf.len((dot + 1) / 2), ACCENT_U32);
+                        cv.rrect(vclip, xf.r(Rect::new(cx as i32 - dot / 2, cy as i32 - dot / 2, dot, dot)), xf.len((dot + 1) / 2), crate::look::accent());
                     }
                     let name = crate::shell::ellipsize(name, 13.5, font::W::Semi, r.w - 60);
                     font::draw_text_w(cv, vclip, xf, r.x + 38, r.y + 23, &name, 13.5, text_color(0.8 + 0.2 * c), r.w - 60, font::W::Semi);
@@ -1392,17 +1488,17 @@ fn draw_page(app: &App, cv: &mut Canvas, l: &Layout) {
                     let y1 = row.at.y as f32 + d.right.value * DEV_ROW as f32 - 4.0;
                     let sel = Rect::from_edges(r0.x, y0.round() as i32, r0.x1(), y1.round() as i32);
                     if sel.h > 0 {
-                        cv.rrect(vclip, xf.r(sel), xf.len(10), argb(30, 167, 139, 250));
+                        cv.rrect(vclip, xf.r(sel), xf.len(10), crate::look::accent_a(30));
                     }
                 }
                 for (i, dev) in devs.iter().enumerate() {
                     let r = dev_rect(row.at, i);
                     let c = drop.map_or(0.0, |d| d.cover(i));
                     let (cx, cy) = (r.x as f32 + 20.0, r.y as f32 + r.h as f32 / 2.0);
-                    cv.ring(vclip, crate::shell::phys(xf, cx, cy), 7.0, 1.5, lerp_argb(text_color(0.5), ACCENT_U32, c));
+                    cv.ring(vclip, crate::shell::phys(xf, cx, cy), 7.0, 1.5, lerp_argb(text_color(0.5), crate::look::accent(), c));
                     let dot = (7.0 * c).round() as i32;
                     if dot >= 1 {
-                        cv.rrect(vclip, xf.r(Rect::new(cx as i32 - dot / 2, cy as i32 - dot / 2, dot, dot)), xf.len((dot + 1) / 2), ACCENT_U32);
+                        cv.rrect(vclip, xf.r(Rect::new(cx as i32 - dot / 2, cy as i32 - dot / 2, dot, dot)), xf.len((dot + 1) / 2), crate::look::accent());
                     }
                     let name = crate::shell::ellipsize(&dev.desc, 13.5, font::W::Semi, r.w - 60);
                     font::draw_text_w(cv, vclip, xf, r.x + 38, r.y + 23, &name, 13.5, text_color(0.8 + 0.2 * c), r.w - 60, font::W::Semi);
@@ -1431,7 +1527,7 @@ fn draw_page(app: &App, cv: &mut Canvas, l: &Layout) {
                     }
                     if sel > 0.01 {
                         let grow = (2.0 * sel).round() as i32;
-                        cv.rrect_stroke(vclip, xf.r(t.inflate(grow)), xf.len(8 + grow), 1.0 + 2.0 * sel.min(1.0), 0xa78bfa, a(sel), a(sel));
+                        cv.rrect_stroke(vclip, xf.r(t.inflate(grow)), xf.len(8 + grow), 1.0 + 2.0 * sel.min(1.0), (crate::look::accent() & 0xff_ffff), a(sel), a(sel));
                     }
                     let name = match path {
                         None => "Liquify (встроенные)".to_string(),

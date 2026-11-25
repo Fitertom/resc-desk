@@ -131,9 +131,10 @@ struct Out {
     backdrop: Image,
     levels: u32,
     bd_set: H,
-    /// The frost: a separable gaussian on the backdrop's level `levels - 1` (blur.frag,
-    /// horizontal into [0], vertical into [1]); ui.frag reads [1].
-    blur: Option<Blur>,
+    /// The frost: a separable gaussian on a level of the backdrop (blur.frag, horizontal
+    /// into [0], vertical into [1]; ui.frag reads [1]), one per level a sigma may need
+    /// (each glass place blurs its own amount): `blurs[l]`, l ≥ 1.
+    blurs: Vec<Option<Blur>>,
     readback: Buffer,
     inst: Buffer,
     /// Not drawn yet: every image starts UNDEFINED and the whole output is damaged.
@@ -142,6 +143,8 @@ struct Out {
 
 /// The frost's images and sets (see Out::blur).
 struct Blur {
+    /// The backdrop's level it blurs.
+    level: u32,
     w: i32,
     h: i32,
     imgs: [Image; 2],
@@ -159,7 +162,8 @@ fn blur_plan(sigma: f32, w: i32, h: i32) -> Option<(u32, f32, f32)> {
         return None;
     }
     let full = 32 - (w.max(h) as u32).leading_zeros();
-    let l = ((sigma / 4.0).log2().floor().max(0.0) as u32).min(full.saturating_sub(1));
+    // Level 1 at least: no full-size blur images (a small sigma is a 1–2 texel kernel there).
+    let l = ((sigma / 4.0).log2().floor().max(1.0) as u32).min(full.saturating_sub(1));
     let sl = sigma / (1u32 << l) as f32;
     // Minus what the box chain and the bilinear upscale add (about a quarter texel squared).
     let k = if l > 0 { (sl * sl - 0.25).max(0.25).sqrt() } else { sl };
@@ -254,6 +258,8 @@ pub struct GlassOp {
     pub cover: [Rect; 2],
     /// A drop (drop.frag's instance, winanim.rs) instead of a box.
     pub drop: Option<[[f32; 4]; 12]>,
+    /// Its frost's sigma, physical px (each glass place has its own, look.rs; 0: none).
+    pub sigma: f32,
 }
 
 /// Window glass: deeper than the panels', so titles stay readable over anything.
@@ -281,7 +287,10 @@ fn window_glass(d: &Desk, wk: WKey, xf: Xf, before: usize) -> Option<GlassOp> {
         let (c, n) = (xf.r(c), xf.len(rad));
         cover = [Rect::new(c.x, c.y, c.w, c.h - n), Rect::new(c.x + n, c.y, c.w - 2 * n, c.h)];
     }
-    Some(GlassOp { rect: xf.r(f), radii: [r; 4], layer: 0, before, tint: TINT_WINDOW, bezel: crate::glass::win_bezel() * s, panel: false, cover, drop: None })
+    // The place's own dim, blur and edge (look.rs): «Проводник», «Параметры», other windows.
+    let g = crate::look::glass(crate::look::Place::of_app(&w.app_id));
+    let tint = crate::glass::tint_at(TINT_WINDOW, g.dim);
+    Some(GlassOp { rect: xf.r(f), radii: [r; 4], layer: 0, before, tint, bezel: g.bezel * s, panel: false, cover, drop: None, sigma: g.blur * s })
 }
 
 /// The drop a moving drop bridges to: the hover one or a drop of its own (life.rs) at its
@@ -345,7 +354,7 @@ fn drop_op(xf: Xf, p: &crate::winanim::Pose, active: bool, hover: Option<Rect>, 
         [glass::THICKNESS * s, glass::BORDER_W * s, 0.0, 0.0],
     ];
     let rect = Rect::from_edges(bb[0].floor() as i32, bb[1].floor() as i32, bb[2].ceil() as i32, bb[3].ceil() as i32);
-    GlassOp { rect, radii: [l.r * s; 4], layer, before, tint, bezel: bez[0], panel: false, cover: [Rect::default(); 2], drop: Some(inst) }
+    GlassOp { rect, radii: [l.r * s; 4], layer, before, tint, bezel: bez[0], panel: false, cover: [Rect::default(); 2], drop: Some(inst), sigma: glass::frost() * s }
 }
 
 /// One of «Пуск»'s drops (startanim.rs) on output `xf`, in a panel's look; `hover`: the
@@ -385,7 +394,7 @@ fn start_op(xf: Xf, sp: &crate::startanim::DropSpec, hover: Option<Rect>) -> Gla
         [glass::THICKNESS * s, glass::BORDER_W * s, 0.0, 0.0],
     ];
     let rect = Rect::from_edges(bb[0].floor() as i32, bb[1].floor() as i32, bb[2].ceil() as i32, bb[3].ceil() as i32);
-    GlassOp { rect, radii: [sp.ra * s; 4], layer: sp.layer, before: 0, tint: sp.tint[0], bezel: sp.bezel * s, panel: false, cover: [Rect::default(); 2], drop: Some(inst) }
+    GlassOp { rect, radii: [sp.ra * s; 4], layer: sp.layer, before: 0, tint: sp.tint[0], bezel: sp.bezel * s, panel: false, cover: [Rect::default(); 2], drop: Some(inst), sigma: crate::glass::frost() * s }
 }
 
 fn cstr(s: &[u8]) -> *const std::ffi::c_char {
@@ -960,7 +969,7 @@ impl Gpu {
     unsafe fn free_out(&self, o: &Out) {
         (self.f.vkDeviceWaitIdle)(self.dev);
         let mut sets = vec![o.bd_set];
-        if let Some(b) = &o.blur {
+        for b in o.blurs.iter().flatten() {
             sets.extend(b.sets);
             for i in &b.imgs {
                 self.free_image(i);
@@ -1361,7 +1370,14 @@ impl Gpu {
 
     /// Mip levels of the backdrop: down to the one the frost blurs (blur_plan).
     fn levels(w: i32, h: i32, scale: f32) -> u32 {
-        blur_plan(crate::glass::frost() * scale, w, h).map_or(1, |(l, _, _)| l + 1)
+        blur_plan(crate::glass::max_frost() * scale, w, h).map_or(1, |(l, _, _)| l + 1)
+    }
+
+    /// The blur for a sigma of `sigma` physical px on `out`, with its sigma and radius in
+    /// that level's texels (None: no frost).
+    fn blur_for(out: &Out, sigma: f32) -> Option<(&Blur, f32, f32)> {
+        let (l, k, radius) = blur_plan(sigma, out.w, out.h)?;
+        out.blurs.get(l as usize).and_then(|b| b.as_ref()).map(|b| (b, k, radius))
     }
 
     unsafe fn out(&mut self, id: u32, w: i32, h: i32, scale: f32) -> R<usize> {
@@ -1386,21 +1402,19 @@ impl Gpu {
         let target = self.image(w, h, 1, usage::COLOR_ATTACHMENT | usage::TRANSFER_SRC)?;
         let backdrop = self.image(w, h, levels, usage::TRANSFER_SRC | usage::TRANSFER_DST | usage::SAMPLED)?;
         let bd_set = self.set(backdrop.view, self.s_mip, true)?;
-        let blur = match blur_plan(crate::glass::frost() * scale, w, h) {
-            Some((l, _, _)) => {
-                let (bw, bh) = ((w >> l).max(1), (h >> l).max(1));
-                let a = self.image(bw, bh, 1, usage::COLOR_ATTACHMENT | usage::SAMPLED)?;
-                let b = self.image(bw, bh, 1, usage::COLOR_ATTACHMENT | usage::SAMPLED)?;
-                let src_view = self.view(backdrop.img, l, 1)?;
-                let sets = [
-                    self.set(src_view, self.s_lin, true)?,
-                    self.set_with(a.view, self.s_lin, 5, layout::SHADER_READ)?,
-                    self.set_with(b.view, self.s_lin, 5, layout::SHADER_READ)?,
-                ];
-                Some(Blur { w: bw, h: bh, imgs: [a, b], src_view, sets })
-            }
-            None => None,
-        };
+        let mut blurs = vec![None];
+        for l in 1..levels {
+            let (bw, bh) = ((w >> l).max(1), (h >> l).max(1));
+            let a = self.image(bw, bh, 1, usage::COLOR_ATTACHMENT | usage::SAMPLED)?;
+            let b = self.image(bw, bh, 1, usage::COLOR_ATTACHMENT | usage::SAMPLED)?;
+            let src_view = self.view(backdrop.img, l, 1)?;
+            let sets = [
+                self.set(src_view, self.s_lin, true)?,
+                self.set_with(a.view, self.s_lin, 5, layout::SHADER_READ)?,
+                self.set_with(b.view, self.s_lin, 5, layout::SHADER_READ)?,
+            ];
+            blurs.push(Some(Blur { level: l, w: bw, h: bh, imgs: [a, b], src_view, sets }));
+        }
         let readback = self.buffer(px, usage::TRANSFER_DST)?;
         let inst = self.buffer(INST_SIZE * MAX_GLASS, usage::VERTEX_BUFFER)?;
         let wall = self.tex(w, h, true, true)?;
@@ -1418,7 +1432,7 @@ impl Gpu {
             backdrop,
             levels,
             bd_set,
-            blur,
+            blurs,
             readback,
             inst,
             fresh: true,
@@ -1606,6 +1620,7 @@ impl Gpu {
                 panel: true,
                 cover: [Rect::default(); 2],
                 drop: None,
+                sigma: crate::glass::frost() * s0,
             };
             zones.push((op.rect, op.cover));
             at_ops.push(op);
@@ -1657,21 +1672,34 @@ impl Gpu {
         let rects = crate::render::widen_for_glass(d, oi, xf, &damage, bounds, &zones);
         let s = xf.scale as f32;
         let mut ops = win_ops;
+        // The calendar's and the timer's flyouts: their places' look (look.rs).
+        let cal = crate::tray::glass(d, oi).zip(crate::tray::cal_fly(d)).map(|(r, f)| {
+            let p = if f == crate::tray::Fly::Timer { crate::look::Place::Timer } else { crate::look::Place::Calendar };
+            (r, crate::look::glass(p))
+        });
         ops.extend(
             crate::shell::glass_panels(d, oi)
                 .into_iter()
                 .filter(|(r, _, _)| !taken.contains(r) && Some(*r) != start_rect)
-                .map(|(r, radius, layer)| GlassOp {
-                    rect: xf.r(r),
-                    radii: [radius as f32 * s; 4],
-                    layer,
-                    before: 0,
-                    // The taskbar's hover drop: clear glass on the island's dark glass.
-                    tint: if lenses.contains(&r) { crate::glass::TINT_LENS } else { crate::glass::TINT_DEEP },
-                    bezel: crate::glass::bezel() * s,
-                    panel: true,
-                    cover: [Rect::default(); 2],
-                    drop: None,
+                .map(|(r, radius, layer)| {
+                    let place = cal.filter(|(c, _)| *c == r).map(|(_, g)| g);
+                    GlassOp {
+                        rect: xf.r(r),
+                        radii: [radius as f32 * s; 4],
+                        layer,
+                        before: 0,
+                        // The taskbar's hover drop: clear glass on the island's dark glass.
+                        tint: match place {
+                            Some(g) => crate::glass::tint_at(crate::glass::TINT_DEEP, g.dim),
+                            None if lenses.contains(&r) => crate::glass::TINT_LENS,
+                            None => crate::glass::TINT_DEEP,
+                        },
+                        bezel: place.map_or(crate::glass::bezel(), |g| g.bezel) * s,
+                        panel: true,
+                        cover: [Rect::default(); 2],
+                        drop: None,
+                        sigma: place.map_or(crate::glass::frost(), |g| if crate::glass::frosted() { g.blur } else { 0.0 }) * s,
+                    }
                 }),
         );
         ops.extend(card_op);
@@ -1930,9 +1958,9 @@ impl Gpu {
             (f.vkCmdBlitImage)(cmd, out.backdrop.img, layout::GENERAL, out.backdrop.img, layout::GENERAL, 1, &blit, FILTER_LINEAR);
         }
         self.barrier(out.backdrop.img, all, (stage::TRANSFER, access::TRANSFER_WRITE, layout::GENERAL), (stage::FRAGMENT, access::SHADER_READ, layout::GENERAL));
-        if let (Some(b), Some((_, sigma, radius))) = (&out.blur, blur_plan(crate::glass::frost() * s, out.w, out.h)) {
-            // The zone on the level (whole texels: it is aligned to it).
-            let l = out.levels - 1;
+        if let Some((b, sigma, radius)) = Self::blur_for(out, op.sigma) {
+            // The zone on the level (whole texels: it is aligned to the coarsest).
+            let l = b.level;
             let zl = Rect::from_edges(z.x >> l, z.y >> l, (z.x1() + (1 << l) - 1) >> l, (z.y1() + (1 << l) - 1) >> l).intersect(&Rect::new(0, 0, b.w, b.h));
             let read = (stage::FRAGMENT, access::SHADER_READ, layout::SHADER_READ);
             let write = (stage::COLOR_OUTPUT, access::COLOR_WRITE, layout::COLOR_ATTACHMENT);
@@ -2006,12 +2034,9 @@ impl Gpu {
                 pc[3] = 1.0;
                 out.bd_set
             } else {
-                match &out.blur {
-                    Some(b) => b.sets[2],
-                    None => {
-                        pc[2] = crate::glass::frost() * s;
-                        out.bd_set
-                    }
+                match Self::blur_for(out, op.sigma) {
+                    Some((b, _, _)) => b.sets[2],
+                    None => out.bd_set,
                 }
             };
             (f.vkCmdBindPipeline)(cmd, BIND_GRAPHICS, self.p_drop);
@@ -2067,15 +2092,11 @@ impl Gpu {
         ui[2] = sw / sh;
         // Our gaussian already blurred it: ui.frag reads it as a sharp background (frost 0:
         // its light four-tap frost, invisible on it), with its saturation and the rest as is.
-        let set = match &out.blur {
-            Some(b) => {
-                ui[10] = 0.0;
-                b.sets[2]
-            }
-            None => {
-                ui[10] = crate::glass::frost() * s;
-                out.bd_set
-            }
+        // (No frost asked: the sharp backdrop, tinted and refracted only.)
+        ui[10] = 0.0;
+        let set = match Self::blur_for(out, op.sigma) {
+            Some((b, _, _)) => b.sets[2],
+            None => out.bd_set,
         };
         ui[11] = 1.0;
         (f.vkCmdBindPipeline)(cmd, BIND_GRAPHICS, self.p_glass);
@@ -2132,7 +2153,7 @@ impl Gpu {
         }
         if fresh {
             self.barrier(out.backdrop.img, SubresourceRange::color(0, REMAINING), (stage::TOP, access::NONE, layout::UNDEFINED), (stage::FRAGMENT, access::SHADER_READ, layout::GENERAL));
-            for i in out.blur.iter().flat_map(|b| &b.imgs) {
+            for i in out.blurs.iter().flatten().flat_map(|b| &b.imgs) {
                 self.barrier(i.img, col, (stage::TOP, access::NONE, layout::UNDEFINED), (stage::FRAGMENT, access::SHADER_READ, layout::SHADER_READ));
             }
         }

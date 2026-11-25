@@ -2,15 +2,19 @@
 //! navigation pane, the items (table, icons, tiles), the status bar, then what floats
 //! (drag ghost, the operations card with its speed graph, toasts, menus, dialogs).
 use super::input::CmdBtn;
-use super::ui::{self, card, glyph, text, text_w, tw, white, G, ACCENT, DIM, FAINT, FG};
+use super::ui::{self, card, glyph, text, text_w, tw, white, G, DIM, FAINT, FG};
 use super::*;
 use crate::font::W;
 use crate::render::{argb, Canvas};
 
-const BG_TABS: u32 = argb(150, 11, 12, 17);
-const BG_BAR: u32 = argb(205, 24, 25, 33);
-const BG_NAV: u32 = argb(228, 19, 20, 26);
-const BG_BODY: u32 = argb(238, 23, 24, 31);
+// The window's own darkness is its glass's (look.rs: «Стекло» → «Проводник»): only light
+// veils here, so the parts still read apart.
+const BG_TABS: u32 = argb(70, 0, 0, 0);
+const BG_BAR: u32 = argb(10, 255, 255, 255);
+const BG_NAV: u32 = argb(26, 0, 0, 0);
+const BG_BODY: u32 = argb(0, 0, 0, 0);
+/// Opaque, for what floats over the rest (a header being dragged).
+const BG_SOLID: u32 = argb(255, 23, 24, 31);
 
 pub fn draw(app: &App, cv: &mut Canvas) {
     let (w, h) = (app.w, app.h);
@@ -151,7 +155,7 @@ fn tabs(app: &App, cv: &mut Canvas) {
     // A tab from another window over the strip: where it would go.
     if let Some(at) = app.tab_drop_at {
         let x = rects.get(at).map_or(plus.x - 2, |r| r.x - 2);
-        cv.rrect(clip, Rect::new(x, 6, 3, TABS_H - 12), 1, ACCENT);
+        cv.rrect(clip, Rect::new(x, 6, 3, TABS_H - 12), 1, ui::accent(255));
     }
     btn_bg(cv, clip, plus, hov(app, Hit::NewTab), false);
     glyph(cv, clip, plus.inflate(-8), G::Plus, DIM);
@@ -260,7 +264,7 @@ fn toolbar(app: &App, cv: &mut Canvas) {
         let t = (sys::now_ns() / 4_000_000 % 1000) as f32 / 1000.0;
         let bw = sr.w / 3;
         let x = sr.x + ((sr.w + bw) as f32 * t) as i32 - bw;
-        cv.fill(sr, Rect::new(x, sr.y1() - 2, bw, 2), ACCENT);
+        cv.fill(sr, Rect::new(x, sr.y1() - 2, bw, 2), ui::accent(255));
     }
 }
 
@@ -282,7 +286,7 @@ fn cmdbar(app: &App, cv: &mut Canvas) {
         let col = if b.on { FG } else { FAINT };
         let gc = if b.on {
             match b.cmd {
-                Cmd::New => ACCENT,
+                Cmd::New => ui::accent(255),
                 Cmd::Delete | Cmd::Empty => argb(255, 0xff, 0x8a, 0x8a),
                 _ => FG,
             }
@@ -323,7 +327,7 @@ fn nav(app: &App, cv: &mut Canvas) {
         let here = *app.loc() == n.loc;
         if here {
             cv.rrect(clip, r, 7, ui::accent(36));
-            cv.rrect(clip, Rect::new(r.x, r.y + 9, 3, r.h - 18), 1, ACCENT);
+            cv.rrect(clip, Rect::new(r.x, r.y + 9, 3, r.h - 18), 1, ui::accent(255));
         }
         let ic = Rect::new(r.x + 12 + n.indent, r.y + 7, 18, 18);
         if !icon(cv, clip, ic, &n.icon) {
@@ -374,10 +378,10 @@ fn header(app: &App, cv: &mut Canvas) {
         if app.view.sort == *c {
             // Windows: a small caret at the top centre of the sorted column.
             let g = Rect::new(r.x + r.w / 2 - 5, r.y + 1, 10, 10);
-            glyph(cv, clip, g, if app.view.desc { G::ChevD } else { G::ChevD }, DIM);
-            if !app.view.desc {
-                // Up: draw the chevron flipped by hand.
-                cv.fill(clip, g, BG_BODY);
+            if app.view.desc {
+                glyph(cv, clip, g, G::ChevD, DIM);
+            } else {
+                // Up: the chevron flipped, by hand.
                 let (cx, cy) = (g.x as f32 + 5.0, g.y as f32 + 5.0);
                 cv.line(clip, (cx - 4.0, cy + 2.0), (cx, cy - 2.0), 1.5, DIM);
                 cv.line(clip, (cx, cy - 2.0), (cx + 4.0, cy + 2.0), 1.5, DIM);
@@ -394,9 +398,9 @@ fn header(app: &App, cv: &mut Canvas) {
             let lx = if to < from { cols[to].1.x } else { cols[to].1.x1() };
             cv.fill(clip, Rect::new(lx - 1, TOP + 4, 3, HEAD_H - 8), ui::accent(255));
             let g = Rect::new(x as i32 - r.w / 2, r.y + 2, r.w, r.h - 4);
-            cv.rrect(clip, g, 6, BG_BODY);
+            cv.rrect(clip, g, 6, BG_SOLID);
             cv.rrect(clip, g, 6, ui::accent(60));
-            cv.rrect_stroke(clip, g, 6, 1.0, ui::ACCENT_RGB.0 << 16 | ui::ACCENT_RGB.1 << 8 | ui::ACCENT_RGB.2, 200, 200);
+            cv.rrect_stroke(clip, g, 6, 1.0, ui::accent_rgb(), 200, 200);
             text(cv, clip, g.x + 10, r.y + 21, c.title(), 12.5, FG, g.w - 20);
         }
     }
@@ -445,7 +449,7 @@ fn content(app: &App, cv: &mut Canvas) {
             break;
         }
         if app.sel[i] && app.focus != Some(i) {
-            cv.rrect(clip, r, 7, ui::SELBG);
+            cv.rrect(clip, r, 7, ui::selbg());
         }
     }
     if let Some(f) = app.focus.filter(|f| *f < app.items.len()) {
@@ -582,7 +586,7 @@ fn tile_pc(cv: &mut Canvas, clip: Rect, r: Rect, it: &Item) {
             let bar = Rect::new(x, r.y + 32, w, 7);
             cv.rrect(clip, bar, 3, white(26));
             let used = if m.size > 0 { 1.0 - m.free as f64 / m.size as f64 } else { 0.0 };
-            let col = if used > 0.9 { ui::BAD } else { ACCENT };
+            let col = if used > 0.9 { ui::BAD } else { ui::accent(255) };
             cv.rrect(clip, Rect::new(bar.x, bar.y, (bar.w as f64 * used).round() as i32, bar.h), 3, col);
             let t = format!("{} свободно из {}", model::size_short(m.free), model::size_short(m.size));
             text(cv, clip, x, r.y + 58, &t, 12.0, DIM, w);
@@ -645,7 +649,7 @@ pub fn drag_icon(app: &App) -> Option<(Vec<u32>, i32, i32, i32, i32)> {
             let t = sel.len().to_string();
             let bw = tw(&t, 11.0) + 12;
             let b = Rect::new(ic.x1() - bw / 2, ic.y - 10, bw, 18);
-            cv.rrect(clip, b, 9, ACCENT);
+            cv.rrect(clip, b, 9, ui::accent(255));
             ui::text_c(&mut cv, clip, b, &t, 11.0, argb(255, 12, 22, 40), W::Bold);
         }
     }
@@ -714,7 +718,7 @@ fn drag_ghost(app: &App, cv: &mut Canvas) {
         let t = sel.len().to_string();
         let bw = tw(&t, 11.0) + 12;
         let b = Rect::new(ic.x1() - bw / 2, ic.y - 8, bw, 18);
-        cv.rrect(clip, b, 9, ACCENT);
+        cv.rrect(clip, b, 9, ui::accent(255));
         ui::text_c(cv, clip, b, &t, 11.0, argb(255, 12, 22, 40), W::Bold);
     }
     let label = match &app.drag_to {
@@ -768,7 +772,7 @@ fn ops_card(app: &App, cv: &mut Canvas) {
     if !app.ops_open {
         let bar = Rect::new(r.x + 16, r.y + 36, r.w - 32, 3);
         cv.rrect(clip, bar, 1, white(24));
-        cv.rrect(clip, Rect::new(bar.x, bar.y, (bar.w as f32 * total_pct) as i32, 3), 1, ACCENT);
+        cv.rrect(clip, Rect::new(bar.x, bar.y, (bar.w as f32 * total_pct) as i32, 3), 1, ui::accent(255));
         return;
     }
     for (i, rr) in rows.iter().enumerate() {
@@ -809,10 +813,10 @@ fn ops_card(app: &App, cv: &mut Canvas) {
                 cv.fill(clip, Rect::from_edges(x, y.round() as i32, x + 1, g.y1()), ui::accent(60));
             }
             for k in 1..pts.len() {
-                cv.line(clip, pts[k - 1], pts[k], 1.5, ACCENT);
+                cv.line(clip, pts[k - 1], pts[k], 1.5, ui::accent(255));
             }
         } else if !p.bytes {
-            cv.rrect(clip, Rect::new(g.x, g.y1() - 3, done_w, 3), 1, ACCENT);
+            cv.rrect(clip, Rect::new(g.x, g.y1() - 3, done_w, 3), 1, ui::accent(255));
         }
         let mut info = String::new();
         if p.bytes && !p.scanning {
@@ -868,7 +872,7 @@ fn menu(app: &App, cv: &mut Canvas, m: &Menu) {
         let ic = Rect::new(r.x + 10, r.y + 8, 16, 16);
         if let Some(c) = it.check {
             if c {
-                glyph(cv, inner, ic, G::Check, ACCENT);
+                glyph(cv, inner, ic, G::Check, ui::accent(255));
             }
         } else if !it.icon.is_empty() {
             if !icon(cv, inner, ic, &it.icon) {
@@ -1035,7 +1039,7 @@ fn dialog(app: &App, cv: &mut Canvas, d: &Dialog) {
             text(cv, all, fr.x + 10, fr.y + 21, &dots, 13.0, FG, fr.w - 20);
             if focus {
                 let cx = fr.x + 10 + tw(&dots, 13.0);
-                cv.fill(all, Rect::new(cx, fr.y + 8, 2, 16), ACCENT);
+                cv.fill(all, Rect::new(cx, fr.y + 8, 2, 16), ui::accent(255));
             }
         } else if focus {
             f.tf.draw(cv, fr, ui::XF, fr.x + 10, fr.y + 21, fr.w - 20, 13.0, FG, W::Text);
@@ -1061,7 +1065,7 @@ fn dialog(app: &App, cv: &mut Canvas, d: &Dialog) {
     if let (Some(cr), Some((label, on))) = (lay.check, &d.check) {
         let cr = cr.translate(0, dy);
         let b = Rect::new(cr.x, cr.y + 3, 18, 18);
-        cv.rrect(all, b, 4, if *on { ACCENT } else { white(10) });
+        cv.rrect(all, b, 4, if *on { ui::accent(255) } else { white(10) });
         cv.rrect_stroke(all, b, 4, 1.2, 0xffffff, if *on { 0 } else { 110 }, if *on { 0 } else { 110 });
         if *on {
             glyph(cv, all, b.inflate(-3), G::Check, argb(255, 12, 22, 40));
@@ -1073,7 +1077,7 @@ fn dialog(app: &App, cv: &mut Canvas, d: &Dialog) {
         let def = i == d.default;
         let hot = d.hot == Some(i);
         if def {
-            cv.rrect(all, b, 7, if hot { argb(255, 0x9a, 0xc2, 0xff) } else { ACCENT });
+            cv.rrect(all, b, 7, if hot { crate::look::accent_light(0.25) } else { ui::accent(255) });
             ui::text_c(cv, all, b, &d.buttons[i], 13.0, argb(255, 12, 22, 40), W::Semi);
         } else {
             cv.rrect(all, b, 7, white(if hot { 30 } else { 18 }));

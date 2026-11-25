@@ -98,6 +98,21 @@ pub fn frost() -> f32 {
     }
 }
 
+/// The widest frost anything asks for now (the panels', every glass place's), CSS px.
+pub fn max_frost() -> f32 {
+    if frosted() {
+        blur().max(crate::look::max_blur())
+    } else {
+        0.0
+    }
+}
+
+/// A place's tint: `base`'s color at the place's dim, premultiplied.
+pub fn tint_at(base: [f32; 4], dim: f32) -> [f32; 4] {
+    let a = base[3].max(1e-3);
+    [base[0] / a * dim, base[1] / a * dim, base[2] / a * dim, dim]
+}
+
 /// kit.rs glass_deep: rgba(18, 18, 22, 0.55), premultiplied.
 /// The taskbar's hover drop (shell.rs `Lens`), the only glass on the taskbar: a faint light
 /// tint, premultiplied, so it reads as a clear drop over the wallpaper.
@@ -251,7 +266,7 @@ fn box_pass(src: &[[f32; 3]], dst: &mut [[f32; 3]], w: usize, h: usize, horizont
 /// Physical px around a glass rect that must be final before it is drawn (shadow quad
 /// of glass.vert, or the reach of the frost, whichever is larger).
 pub fn margin(scale: f32) -> i32 {
-    let f = ((frost() * scale / 2.0).round() as i32).max(1);
+    let f = ((max_frost() * scale / 2.0).round() as i32).max(1);
     ((GLASS_MARGIN + SHADOW_DROP) * scale).ceil().max(((2 * K as i32 + 2) * f) as f32) as i32 + 2
 }
 

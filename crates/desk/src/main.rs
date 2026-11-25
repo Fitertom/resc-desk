@@ -20,6 +20,7 @@ mod input;
 mod ipc;
 mod jpeg;
 mod layout;
+mod look;
 mod net;
 mod png;
 mod pulse;
@@ -233,6 +234,7 @@ fn main() {
     glass::set(d.display_cfg.glass_frosted, d.display_cfg.glass_blur);
     glass::set_bezel(d.display_cfg.glass_bezel, d.display_cfg.glass_win_bezel);
     // The built-in wallpaper until the picture is decoded (on a thread).
+    wallpaper::update_accent(&mut d);
     if let Some(p) = d.display_cfg.wallpaper.clone() {
         wallpaper::set(&mut d, Some(p));
     }

@@ -341,7 +341,7 @@ pub fn geom(d: &Desk, oi: usize) -> Option<Geom> {
     let pm = fly(br, map(fcx + 40.0, gy0), map(lerp(fcx, pmx, 0.55), gy0), [(gx + px) / 2.0, gy], bs, bs, p[P_FLY]);
     let ps = p[P_SPLIT];
 
-    let bl_col = crate::render::lerp(WHITE, col::ACCENT, 110);
+    let bl_col = crate::render::lerp(WHITE, col::accent(), 110);
     Some(Geom {
         f,
         btn,
@@ -357,7 +357,7 @@ pub fn geom(d: &Desk, oi: usize) -> Option<Geom> {
         pill: [sx0, scy - sh / 2.0, sx1, scy + sh / 2.0],
         u,
         ur: lerp(3.0, av.w as f32 / 2.0, ul),
-        ucol: crate::render::lerp(bl_col, col::ACCENT, (ul * 255.0) as u32),
+        ucol: crate::render::lerp(bl_col, col::accent(), (ul * 255.0) as u32),
         pw: [lerp4(pm, bx(gx, gy, bs, bs), ps), lerp4(pm, bx(px, gy, bs, bs), ps)],
         pr: lerp(3.0, bs / 2.0, p[P_FLY].clamp(0.0, 1.0)),
         pk: KP * bump(ps),
@@ -412,8 +412,8 @@ pub fn drops(d: &Desk, oi: usize) -> Vec<DropSpec> {
         });
     }
     let chip = |c: u32| mix4(CHIP_TINT, premul(c), g.solid);
-    let tr = crate::render::lerp(WHITE, col::ACCENT, 110);
-    let br = crate::render::lerp(WHITE, col::ACCENT, 200);
+    let tr = crate::render::lerp(WHITE, col::accent(), 110);
+    let br = crate::render::lerp(WHITE, col::accent(), 200);
     v.push(DropSpec { a: g.s[0], ra: g.sr[0], b: Some((g.s[1], g.sr[1])), k: g.sk, tint: [chip(WHITE), chip(tr)], bezel: CHIP_BEZEL, sh: CHIP_SH, layer: 2, bridge: None });
     v.push(DropSpec { a: g.pw[0], ra: g.pr, b: Some((g.pw[1], g.pr)), k: g.pk, tint: [chip(br); 2], bezel: CHIP_BEZEL, sh: CHIP_SH, layer: 2, bridge: None });
     // The avatar stays solid: the logo's colour going to the accent.

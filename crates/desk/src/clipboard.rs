@@ -343,7 +343,7 @@ pub fn draw(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
         let fill = if sel { argb(34, 255, 255, 255) } else if hot { argb(26, 255, 255, 255) } else { argb(14, 255, 255, 255) };
         cv.rrect(clip, xf.r(r), xf.len(12), fill);
         if sel {
-            cv.rrect_stroke(clip, xf.r(r), xf.len(12), 1.5 * xf.scale as f32, 0xa78bfa, 220, 220);
+            cv.rrect_stroke(clip, xf.r(r), xf.len(12), 1.5 * xf.scale as f32, (crate::look::accent() & 0xff_ffff), 220, 220);
         }
         for (n, l) in lines.iter().enumerate() {
             font::draw_text(cv, clip, xf, r.x + 14, r.y + 14 + 13 + n as i32 * LINE_H, l, 13.0, col::TEXT, r.w - 28);
@@ -355,7 +355,7 @@ pub fn draw(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
         if i == 0 {
             let s = "сейчас в буфере";
             let sw = font::text_width_w(s, 11.5, font::W::Semi);
-            font::draw_text_w(cv, clip, xf, r.x1() - 14 - sw, r.y1() - 12, s, 11.5, col::ACCENT, 160, font::W::Semi);
+            font::draw_text_w(cv, clip, xf, r.x1() - 14 - sw, r.y1() - 12, s, 11.5, col::accent(), 160, font::W::Semi);
         }
     }
 }

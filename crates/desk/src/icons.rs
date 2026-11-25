@@ -281,7 +281,18 @@ pub fn get(key: &str, px: i32) -> Option<Rc<Pic>> {
                 f
             }
         };
-        let pic = file.and_then(|f| load(&f, px)).map(Rc::new);
+        let pic = file
+            .and_then(|f| {
+                let place = crate::look::is_place_icon(&f.to_string_lossy());
+                load(&f, px).map(|mut p| {
+                    // Folders, home, the user folders: in the ambient color (look.rs).
+                    if place {
+                        crate::look::tint_pixels(&mut p.px);
+                    }
+                    p
+                })
+            })
+            .map(Rc::new);
         c.pics.insert(ck, pic.clone());
         pic
     })

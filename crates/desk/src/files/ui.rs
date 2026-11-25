@@ -10,21 +10,29 @@ pub const XF: Xf = Xf { ox: 0, oy: 0, scale: 1.0, px: 0, py: 0 };
 pub const FG: u32 = argb(255, 0xec, 0xee, 0xf6);
 pub const DIM: u32 = argb(255, 0x9b, 0xa1, 0xb5);
 pub const FAINT: u32 = argb(255, 0x6b, 0x71, 0x86);
-pub const ACCENT: u32 = argb(255, 0x7f, 0xb0, 0xff);
-pub const ACCENT_RGB: (u32, u32, u32) = (0x7f, 0xb0, 0xff);
 pub const WARN: u32 = argb(255, 0xf2, 0xb4, 0x5a);
 pub const BAD: u32 = argb(255, 0xff, 0x6b, 0x6b);
 pub const GOOD: u32 = argb(255, 0x5f, 0xd3, 0x9a);
 pub const HOVER: u32 = argb(14, 255, 255, 255);
-pub const SELBG: u32 = argb(38, 0x7f, 0xb0, 0xff);
 pub const LINE: u32 = argb(20, 255, 255, 255);
 
 pub fn white(a: u32) -> u32 {
     argb(a, 255, 255, 255)
 }
 
+/// The ambient color (look.rs: the wallpaper's, as Liquify takes a cover's) at opacity `a`.
 pub fn accent(a: u32) -> u32 {
-    argb(a, ACCENT_RGB.0, ACCENT_RGB.1, ACCENT_RGB.2)
+    crate::look::accent_a(a)
+}
+
+/// The ambient color, straight RGB (strokes).
+pub fn accent_rgb() -> u32 {
+    crate::look::accent() & 0xff_ffff
+}
+
+/// The selection's background.
+pub fn selbg() -> u32 {
+    accent(38)
 }
 
 pub fn text(cv: &mut Canvas, clip: Rect, x: i32, y: i32, s: &str, size: f32, color: u32, max_w: i32) {

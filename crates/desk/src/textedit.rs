@@ -278,7 +278,7 @@ impl TextField {
         if let Some((a, b)) = self.sel() {
             let (xa, xb) = (width(a) - scroll, width(b) - scroll);
             let r = Rect::from_edges(x + xa.max(0), baseline - size as i32 - 1, x + xb.min(w), baseline + 5);
-            cv.rrect(area, xf.r(r), xf.len(3), argb(110, 167, 139, 250));
+            cv.rrect(area, xf.r(r), xf.len(3), crate::look::accent_a(110));
         }
         // Text clipped to the field: draw from the first visible char.
         let mut first = 0;
@@ -289,7 +289,7 @@ impl TextField {
         let s: String = self.text[first..].iter().collect();
         font::draw_text_w(cv, area, xf, x + off, baseline, &s, size, color, w - off, weight);
         let cx = x + caret_x - scroll;
-        cv.fill(area, xf.r(Rect::new(cx, baseline - size as i32, 2, size as i32 + 4)), 0xffa7_8bfa);
+        cv.fill(area, xf.r(Rect::new(cx, baseline - size as i32, 2, size as i32 + 4)), crate::look::accent());
     }
 }
 

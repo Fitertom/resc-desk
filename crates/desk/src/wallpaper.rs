@@ -63,6 +63,7 @@ pub fn set(d: &mut Desk, path: Option<String>) {
             let _ = d.wall.load(None);
             d.display_cfg.wallpaper = None;
             d.damage_all();
+            update_accent(d);
             let _ = crate::layout::save_config(d);
         }
         Some(p) => {
@@ -80,6 +81,20 @@ pub fn set(d: &mut Desk, path: Option<String>) {
     }
 }
 
+/// The ambient color from the wallpaper now (look.rs): everything wearing it redrawn, the
+/// apps told.
+pub fn update_accent(d: &mut Desk) {
+    let a = match &d.wall.img {
+        Some(img) => crate::look::accent_of(&img.px, img.w, img.h),
+        None => crate::look::accent_of(&builtin(160, 90), 160, 90),
+    };
+    if crate::look::set_accent(a) {
+        crate::icons::reset();
+        d.damage_all();
+    }
+    crate::look::publish();
+}
+
 /// A picture finished decoding: show it, remember it.
 pub fn poll(d: &mut Desk) {
     let Some((path, slot)) = &d.wall.loading else { return };
@@ -92,6 +107,7 @@ pub fn poll(d: &mut Desk) {
             d.wall.invalidate();
             d.display_cfg.wallpaper = Some(path);
             d.damage_all();
+            update_accent(d);
             let _ = crate::layout::save_config(d);
         }
         Err(e) => eprintln!("wallpaper: {e}"),

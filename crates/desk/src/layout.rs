@@ -78,6 +78,12 @@ pub fn load_config() -> DisplayConfig {
             ["anim_launch", v] => c.anim_launch = v.parse::<u8>().unwrap_or(0).min(1),
             ["anim_close", v] => c.anim_close = v.parse::<u8>().unwrap_or(0).min(2),
             ["glass_blur", v] => c.glass_blur = v.parse().unwrap_or(crate::glass::FROST).clamp(0.0, crate::glass::MAX_BLUR),
+            // A glass place's dim, blur and edge (look.rs).
+            ["glass_place", k, dim, blur, bezel] => {
+                if let (Some(p), Ok(dim), Ok(blur), Ok(bezel)) = (crate::look::Place::from_key(k), dim.parse(), blur.parse(), bezel.parse()) {
+                    crate::look::set_glass(p, crate::look::Glass { dim, blur, bezel });
+                }
+            }
             ["output", name, x, y, w, h] => {
                 let v: Vec<f64> = [x, y, w, h].iter().filter_map(|s| s.parse().ok()).collect();
                 if v.len() == 4 && v[2] > 0.0 && v[3] > 0.0 {
@@ -105,6 +111,10 @@ pub fn save_config(d: &Desk) -> std::io::Result<String> {
     s.push_str(&format!("glass_blur {}\n", d.display_cfg.glass_blur));
     s.push_str(&format!("glass_bezel {}\n", d.display_cfg.glass_bezel));
     s.push_str(&format!("glass_win_bezel {}\n", d.display_cfg.glass_win_bezel));
+    for p in crate::look::PLACES {
+        let g = crate::look::glass(p);
+        s.push_str(&format!("glass_place {} {} {} {}\n", p.key(), g.dim, g.blur, g.bezel));
+    }
     s.push_str(&format!("anim_launch {}\n", d.display_cfg.anim_launch));
     s.push_str(&format!("anim_close {}\n", d.display_cfg.anim_close));
     // Keep entries of monitors that are not connected right now.
