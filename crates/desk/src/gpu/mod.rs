@@ -1674,6 +1674,7 @@ impl Gpu {
         // The pictures' generations of `draws` (a surface's commits, a frame's key).
         let mut gens: Vec<u64> = Vec::new();
         let wall_key = self.outs[k].wall_key.unwrap_or_default();
+        let live_area = crate::livewall::area(d, oi).map(|(r, g)| (xf.r(r).inflate(2), g));
         let out_fresh = self.outs[k].fresh;
         let m_px = crate::glass::margin(xf.scale as f32);
         // Glass the damage widens to (and what of it a window's opaque content covers).
@@ -1709,7 +1710,12 @@ impl Gpu {
                             ("win", wk).hash(&mut h);
                             h.finish() | 1
                         };
-                        op.under = under_key(zone, op.sigma, wall_key, &draws, &gens, &win_ops);
+                        // Live wallpaper trails under it: what it frosts changes every step.
+                        let wk_live = match live_area {
+                            Some((r, g)) if r.overlaps(&zone) => (wall_key.0 ^ g.wrapping_mul(0x9e37_79b9_7f4a_7c15), wall_key.1, wall_key.2),
+                            _ => wall_key,
+                        };
+                        op.under = under_key(zone, op.sigma, wk_live, &draws, &gens, &win_ops);
                         let level = blur_plan(op.sigma, w, h).map(|p| p.0);
                         op.hit = !out_fresh
                             && level.is_some()

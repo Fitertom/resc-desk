@@ -39,6 +39,8 @@ pub struct Live {
     /// Fade toward the wallpaper's picture instead of black.
     pub on_picture: bool,
     rng: u64,
+    /// Steps taken (glass over the trails is blurred again when it changes, gpu.rs).
+    pub gen: u64,
 }
 
 /// What an output's trail image gets this frame (gpu.rs).
@@ -66,6 +68,7 @@ impl Live {
             hist: Vec::new(),
             on_picture,
             rng: sys::now_ns() | 1,
+            gen: 0,
         };
         for i in 0..N {
             let v = l.rand().sqrt() * 32.0;
@@ -123,6 +126,7 @@ pub fn tick(d: &mut Desk, dt: f32) -> bool {
     while l.acc >= STEP {
         l.acc -= STEP;
         stepped = true;
+        l.gen += 1;
         let g = if l.pulse > 0.0 { G * CLICK_G } else { G };
         l.pulse -= STEP;
         let mut per: Vec<Vec<[f32; 4]>> = vec![Vec::new(); n_out];
@@ -182,8 +186,20 @@ fn hidden(d: &Desk, oi: usize, r: Rect) -> bool {
         let w = &d.windows[wk];
         !w.desktop()
             && d.surfaces.get(w.surf).is_some_and(|s| s.is_opaque())
-            && crate::wm::frame_rect(d, wk).is_some_and(|f| f.contains_rect(&r))
+            // Its content, not its frame: the frame's glass shows the wallpaper through.
+            && d.surfaces.get(w.surf).is_some_and(|s| {
+                let g = s.geom();
+                Rect::new(w.x, w.y, g.w, g.h).contains_rect(&r)
+            })
     })
+}
+
+/// Where output `oi`'s trails are (logical) and the step they are at: glass over them is
+/// blurred again (its kept frost is of trails gone by).
+pub fn area(d: &Desk, oi: usize) -> Option<(Rect, u64)> {
+    let l = d.live.as_ref()?;
+    let r = l.hist.get(oi)?.iter().filter(|r| !r.is_empty()).fold(None, |a: Option<Rect>, r| Some(a.map_or(*r, |a| a.union(r))))?;
+    Some((r, l.gen))
 }
 
 /// What output `oi`'s trail image gets now (taken: drawn once). None when off.
