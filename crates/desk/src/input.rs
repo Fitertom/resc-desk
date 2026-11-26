@@ -267,9 +267,18 @@ fn clamp_to_layout(d: &Desk, x: f64, y: f64) -> (f64, f64) {
     (best.0, best.1)
 }
 
+/// The pointer has not moved but what is under it has (a shell panel opened or closed over a
+/// window): who has it is picked again.
+pub fn rehover(d: &mut Desk) {
+    if matches!(d.seat.grab, Grab::None) {
+        let t = d.now_ms();
+        hover(d, t);
+    }
+}
+
 fn hover(d: &mut Desk, time: u32) {
     let (x, y) = (d.seat.x, d.seat.y);
-    if shell::taskbar_contains(d, x, y) {
+    if shell::overlay_contains(d, x, y) {
         set_ptr_focus(d, None);
         set_hover(d, None);
         return;

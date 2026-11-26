@@ -87,7 +87,7 @@ pub fn motion(d: &mut Desk, time: u32) {
         return;
     }
     let (x, y) = (d.seat.x, d.seat.y);
-    let under = if crate::shell::taskbar_contains(d, x, y) {
+    let under = if crate::shell::overlay_contains(d, x, y) {
         None
     } else {
         match wm::hit_test(d, x, y) {

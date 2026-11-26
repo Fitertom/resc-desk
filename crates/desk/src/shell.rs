@@ -447,6 +447,18 @@ pub fn taskbar_contains(d: &Desk, x: f64, y: f64) -> bool {
         || (crate::taskview::is_open(d) && d.output_at(x, y) == d.overlay.taskview.as_ref().map(|t| t.oi))
 }
 
+/// The shell is over (x, y): the taskbar and its flyouts, or a panel open over the windows
+/// (start menu, clipboard, monitors). The window under it gets no pointer there: no hover,
+/// no wheel.
+pub fn overlay_contains(d: &Desk, x: f64, y: f64) -> bool {
+    taskbar_contains(d, x, y)
+        || (0..d.outputs.len()).any(|oi| {
+            (d.overlay.start_menu == Some(oi) && crate::start::rect(d, oi).contains(x, y))
+                || crate::clipboard::glass_rect(d, oi).is_some_and(|r| r.contains(x, y))
+                || crate::monitors::glass_rect(d, oi).is_some_and(|r| r.contains(x, y))
+        })
+}
+
 /// No taskbar on output `oi` now: a fullscreen window covers it (unless Win brought it out
 /// over it), or the taskbar is on the main monitor only.
 fn fullscreen_on(d: &Desk, oi: usize) -> bool {
@@ -1435,6 +1447,7 @@ fn toggle_start_on(d: &mut Desk, oi: usize) {
         d.damage(r.inflate(GLASS_REACH));
         damage_taskbars(d);
         crate::startanim::begin(d, old, false);
+        crate::input::rehover(d);
         return;
     }
     d.overlay.switcher = None;
@@ -1452,6 +1465,7 @@ fn toggle_start_on(d: &mut Desk, oi: usize) {
     damage_taskbars(d);
     crate::startanim::begin(d, oi, true);
     taskbar_poke(d);
+    crate::input::rehover(d);
 }
 
 pub fn damage_start(d: &mut Desk) {
