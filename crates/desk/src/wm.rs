@@ -53,6 +53,17 @@ pub fn workarea(d: &Desk, oi: usize) -> Rect {
     Rect::new(r.x, r.y, r.w, r.h - shell::TASKBAR_H)
 }
 
+/// Where the shell's own panels («Пуск», Win+V) sit: above the taskbar even when it hides
+/// (it comes out with them).
+pub fn panel_area(d: &Desk, oi: usize) -> Rect {
+    let Some(o) = d.outputs.get(oi) else { return Rect::new(0, 0, 800, 600) };
+    let r = o.rect();
+    if !shell::has_taskbar(d, oi) {
+        return r;
+    }
+    Rect::new(r.x, r.y, r.w, r.h - shell::TASKBAR_H)
+}
+
 /// Outer frame (decorations included) in global coords.
 pub fn frame_rect(d: &Desk, wk: WKey) -> Option<Rect> {
     let w = d.windows.get(wk)?;

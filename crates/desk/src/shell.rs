@@ -1389,7 +1389,7 @@ pub fn tick(d: &mut Desk) -> bool {
         let away = !want && (covered || now_ms.wrapping_sub(a.wanted_ms) > 600);
         a.away.response = 0.28;
         a.away.damping = 1.0;
-        if covered && a.away.target != 1.0 {
+        if covered && away && a.away.target != 1.0 {
             // Under a game: gone at once, no slide over it.
             a.away.snap(1.0);
         } else {
@@ -1446,6 +1446,7 @@ fn toggle_start_on(d: &mut Desk, oi: usize) {
     d.damage(r.inflate(GLASS_REACH));
     damage_taskbars(d);
     crate::startanim::begin(d, oi, true);
+    taskbar_poke(d);
 }
 
 pub fn damage_start(d: &mut Desk) {

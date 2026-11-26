@@ -105,7 +105,7 @@ pub fn readable(d: &mut Desk, tok: u64) {
         d.ep.remove(r.fd.as_raw_fd());
         if r.paste {
             if d.overlay.start_menu.is_some() {
-                d.start_field.insert(&String::from_utf8_lossy(&r.buf));
+                d.start_field.insert(&search_text(&r.buf));
                 d.start_sel = 0;
                 crate::shell::damage_start(d);
             }
@@ -130,7 +130,12 @@ pub fn set_text(d: &mut Desk, s: String) {
 /// Ctrl+V in the start menu's search: the clipboard, now or once it is read.
 pub fn paste_into_start(d: &mut Desk) {
     let Some(k) = d.selection else { return };
-    let own = d.sources.get(k).and_then(|s| s.own.clone());
+    // Text only (a screenshot's PNG is not a search), one line of it.
+    let Some(src) = d.sources.get(k) else { return };
+    if !TEXT_MIMES.iter().any(|m| src.mimes.iter().any(|x| x == *m)) {
+        return;
+    }
+    let own = src.own.clone();
     let text = match own {
         Some(t) => Some(t),
         None if d.clip.last_dk == Some(k) => d.clip.items.first().map(|e| e.text.clone()),
@@ -138,11 +143,17 @@ pub fn paste_into_start(d: &mut Desk) {
     };
     match text {
         Some(t) => {
-            d.start_field.insert(&String::from_utf8_lossy(&t));
+            d.start_field.insert(&search_text(&t));
             d.start_sel = 0;
         }
         None => start_read(d, k, true),
     }
+}
+
+/// What of pasted bytes goes into the search field: the first line, at most 256 characters.
+fn search_text(b: &[u8]) -> String {
+    let s = String::from_utf8_lossy(&b[..b.len().min(4096)]);
+    s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().filter(|c| !c.is_control()).take(256).collect()
 }
 
 /// Adds to the history (or moves an equal entry to the top). False if nothing kept.
@@ -301,7 +312,7 @@ pub(crate) fn wrap(s: &str, mut cut: bool, max_lines: usize, too_wide: impl Fn(&
 
 /// Panel, "clear all" button, and the visible entries (index, rect, preview).
 fn panel(d: &Desk, oi: usize) -> (Rect, Rect, Vec<(usize, Rect, Vec<String>)>) {
-    let wa = crate::wm::workarea(d, oi);
+    let wa = crate::wm::panel_area(d, oi);
     let inner = W - 32;
     let mut cells = Vec::new();
     let mut y = 64;

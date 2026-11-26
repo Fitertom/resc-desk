@@ -145,7 +145,7 @@ pub fn opened(d: &mut Desk) {
 }
 
 pub fn rect(d: &Desk, oi: usize) -> Rect {
-    let wa = crate::wm::workarea(d, oi);
+    let wa = crate::wm::panel_area(d, oi);
     let (w, h) = (660.min(wa.w - 24), 600.min(wa.h - 24));
     Rect::new(wa.x + (wa.w - w) / 2, wa.y1() - h - 8, w, h)
 }
