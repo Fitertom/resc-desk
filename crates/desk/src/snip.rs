@@ -1,11 +1,12 @@
-//! Win+Shift+S: a snip of the screen to the clipboard. The screens dim, a drag picks the
-//! area (it stays clear), letting go copies it as a PNG and ends; Esc or a right click
-//! cancels. No buttons, no editor, nothing saved.
+//! Win+Shift+S: a snip of the screen to the clipboard. At the press the screens freeze as
+//! they are (videos, games, everything stops for the eye): a drag over the still picture
+//! picks the area (the rest dims), letting go copies it as a PNG and ends; Esc or a right
+//! click cancels. No buttons, no editor, nothing saved.
 //!
-//! The picture is not taken from the dimmed screens: the dim and the cursor go first, and
-//! once every monitor under the area has shown a frame without them, their pixels are read
-//! (the GPU's frames: games and video included) and cut to the area at the sharpest of
-//! their scales.
+//! The freeze: the cursor goes for one frame, and once every monitor has shown that frame
+//! their pixels are read (the GPU's frames: games and video included) and shown in place of
+//! the live screens until the snip ends; the area is cut from them at the sharpest of their
+//! scales.
 use crate::backend::Backend;
 use crate::desk::Desk;
 use crate::geom::Rect;
@@ -13,32 +14,49 @@ use crate::render::{argb, Canvas, Xf};
 use crate::state::DataSource;
 use std::sync::Arc;
 
+/// One output's picture at the moment of Win+Shift+S (physical px).
+pub struct Frozen {
+    px: Vec<u32>,
+    w: i32,
+    h: i32,
+}
+
 #[derive(Default)]
 pub struct Snip {
-    /// Waiting for the drag / dragging from (x, y) (logical).
+    /// Picking (the screens frozen): waiting for the drag / dragging from (x, y) (logical).
     pub on: bool,
     pub from: Option<(f64, f64)>,
     pub to: (f64, f64),
-    /// Let go: the area, the frame count of each output then, and when (gives up after 1 s).
-    taking: Option<(Rect, Vec<u64>, u64)>,
+    /// Win+Shift+S pressed: the frame count of each output then, and when; the screens are
+    /// read once each has shown a frame without the cursor (at most 150 ms later).
+    freezing: Option<(Vec<u64>, u64)>,
+    /// The screens as they were, per output: shown while picking, cut from at the end.
+    frozen: Vec<Option<Frozen>>,
 }
 
 pub fn toggle(d: &mut Desk) {
-    if d.snip.on || d.snip.taking.is_some() {
+    if d.snip.on || d.snip.freezing.is_some() {
         cancel(d);
         return;
     }
-    d.snip = Snip { on: true, from: None, to: (d.seat.x, d.seat.y), taking: None };
-    d.damage_all();
+    let frames = d.outputs.iter().map(|o| o.frames).collect();
+    d.snip = Snip { on: false, from: None, to: (d.seat.x, d.seat.y), freezing: Some((frames, sys::now_ns())), frozen: Vec::new() };
+    // Only the cursor goes now; everything else is read as it is.
+    let c = crate::render::cursor_rect(d);
+    d.damage(c.inflate(2));
+    for o in &mut d.outputs {
+        o.wants_frame = true;
+    }
 }
 
+/// Picking, or about to (the keys and the pointer are the snip's from the press on).
 pub fn active(d: &Desk) -> bool {
-    d.snip.on
+    d.snip.on || d.snip.freezing.is_some()
 }
 
-/// While taking the picture the cursor is left out.
+/// While the screens are read the cursor is left out.
 pub fn hides_cursor(d: &Desk) -> bool {
-    d.snip.taking.is_some()
+    d.snip.freezing.is_some()
 }
 
 pub fn cancel(d: &mut Desk) {
@@ -56,10 +74,10 @@ fn area(s: &Snip) -> Option<Rect> {
 /// Keys while snipping: Esc cancels, other presses are swallowed (releases go on, so
 /// the window does not keep Win / Shift held).
 pub fn key(d: &mut Desk, code: u32, pressed: bool) -> bool {
-    if !d.snip.on || !pressed {
+    if !active(d) || !pressed {
         return false;
     }
-    if pressed && code == crate::input::key::ESC {
+    if code == crate::input::key::ESC {
         cancel(d);
     }
     true
@@ -67,11 +85,17 @@ pub fn key(d: &mut Desk, code: u32, pressed: bool) -> bool {
 
 /// A press while snipping (true: taken). The left button starts the area, others cancel.
 pub fn press(d: &mut Desk, button: u32) -> bool {
-    if !d.snip.on {
+    if !active(d) {
         return false;
     }
     if button != crate::input::BTN_LEFT {
         cancel(d);
+        return true;
+    }
+    if !d.snip.on {
+        // Still reading the screens (a few ms): the drag starts here all the same.
+        d.snip.from = Some((d.seat.x, d.seat.y));
+        d.snip.to = (d.seat.x, d.seat.y);
         return true;
     }
     d.snip.from = Some((d.seat.x, d.seat.y));
@@ -80,12 +104,18 @@ pub fn press(d: &mut Desk, button: u32) -> bool {
 }
 
 pub fn motion(d: &mut Desk, x: f64, y: f64) {
-    if !d.snip.on || d.snip.from.is_none() {
+    if !active(d) || d.snip.from.is_none() {
+        if d.snip.freezing.is_some() {
+            d.snip.to = (x, y);
+        }
         return;
     }
     let old = area(&d.snip);
     d.snip.to = (x, y);
     let new = area(&d.snip);
+    if !d.snip.on {
+        return;
+    }
     match (old, new) {
         (Some(a), Some(b)) => d.damage(a.union(&b).inflate(4)),
         _ => d.damage_all(),
@@ -103,22 +133,29 @@ pub fn release(d: &mut Desk) {
         d.damage_all();
         return;
     }
-    let frames = d.outputs.iter().map(|o| o.frames).collect();
-    d.snip = Snip { on: false, from: None, to: (0.0, 0.0), taking: Some((r, frames, sys::now_ns())) };
+    take(d, r);
+    cancel(d);
+}
+
+/// In the main loop after presenting: once every output has shown a frame without the
+/// cursor, the screens are read and frozen.
+pub fn process(d: &mut Desk, b: &mut dyn Backend) {
+    let Some((frames, at)) = d.snip.freezing.clone() else { return };
+    let late = sys::now_ns().saturating_sub(at) > 150_000_000;
+    let fresh = (0..d.outputs.len()).all(|i| d.outputs[i].frames > frames.get(i).copied().unwrap_or(0));
+    if !late && !fresh {
+        return;
+    }
+    d.snip.frozen = (0..d.outputs.len()).map(|oi| b.read_pixels(d, oi).map(|(px, w, h)| Frozen { px, w, h })).collect();
+    d.snip.freezing = None;
+    d.snip.on = true;
     d.damage_all();
 }
 
-/// In the main loop after presenting: once the monitors under the area show a clean frame,
-/// cut it out and make it the clipboard.
-pub fn process(d: &mut Desk, b: &mut dyn Backend) {
-    let Some((r, frames, at)) = d.snip.taking.clone() else { return };
-    let under: Vec<usize> = (0..d.outputs.len()).filter(|&i| d.outputs[i].rect().overlaps(&r)).collect();
-    let late = sys::now_ns().saturating_sub(at) > 1_000_000_000;
-    if !late && under.iter().any(|&i| d.outputs[i].frames <= frames.get(i).copied().unwrap_or(0)) {
-        return;
-    }
-    d.snip.taking = None;
-    d.damage_all();
+/// Cuts `r` (logical) out of the frozen screens at the sharpest of their scales and makes it
+/// the clipboard.
+fn take(d: &mut Desk, r: Rect) {
+    let under: Vec<usize> = (0..d.outputs.len()).filter(|&i| d.outputs[i].rect().overlaps(&r) && d.snip.frozen.get(i).is_some_and(|f| f.is_some())).collect();
     if under.is_empty() {
         return;
     }
@@ -126,7 +163,8 @@ pub fn process(d: &mut Desk, b: &mut dyn Backend) {
     let (w, h) = (((r.w as f64) * s).round().max(1.0) as i32, ((r.h as f64) * s).round().max(1.0) as i32);
     let mut img = vec![0xff00_0000u32; (w * h) as usize];
     for &oi in &under {
-        let Some((px, pw, ph)) = b.read_pixels(d, oi) else { continue };
+        let Some(Some(f)) = d.snip.frozen.get(oi) else { continue };
+        let (px, pw, ph) = (&f.px, f.w, f.h);
         let o = &d.outputs[oi];
         let (orect, os) = (o.rect(), o.scale);
         for iy in 0..h {
@@ -165,6 +203,12 @@ pub fn draw(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
         return;
     }
     let o = d.outputs[oi].rect();
+    // The screen as it was at the press: nothing under it moves while picking.
+    if let Some(Some(f)) = d.snip.frozen.get(oi) {
+        let dst = xf.r(o);
+        let src = Rect::new(0, 0, f.w, f.h);
+        cv.blit(clip, Rect::new(dst.x, dst.y, f.w, f.h), &f.px, f.w as usize, src, true, 255);
+    }
     let dim = argb(110, 0, 0, 0);
     let Some(a) = area(&d.snip).filter(|a| a.overlaps(&o)) else {
         cv.fill(clip, xf.r(o), dim);
