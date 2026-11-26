@@ -103,6 +103,9 @@ fn bind_socket(dir: &str, wanted: Option<&str>) -> std::io::Result<(UnixListener
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if std::env::var("RESC_SCANOUT").is_ok_and(|v| v == "0") {
+        render::SCANOUT.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     if args.get(1).map(String::as_str) == Some("ctl") {
         std::process::exit(ipc::ctl(&args[2..]));
     }
@@ -248,6 +251,7 @@ fn main() {
         wall: Default::default(),
         clip: Default::default(),
         toasts: Vec::new(),
+        on_screen: Default::default(),
         mons: Default::default(),
         gpu: None,
         bench: Default::default(),

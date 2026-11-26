@@ -251,6 +251,27 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             out.push_str(&format!("glue {}
 ", if d.display_cfg.glue { "on" } else { "off" }));
         }
+        // fullscreen: the focused window on or off fullscreen (tests).
+        "fullscreen" => {
+            if let Some(wk) = crate::wm::focused(d) {
+                let on = d.windows[wk].tile != crate::state::Tile::Fullscreen;
+                crate::wm::fullscreen(d, wk, on, None);
+            }
+        }
+        // scanout: per output, whether its window goes to the monitor as it is, or why not.
+        "scanout" => {
+            match rest.first().copied() {
+                Some("off") => crate::render::SCANOUT.store(false, std::sync::atomic::Ordering::Relaxed),
+                Some("on") => crate::render::SCANOUT.store(true, std::sync::atomic::Ordering::Relaxed),
+                _ => {}
+            }
+            d.damage_all();
+            out.push_str(if crate::render::SCANOUT.load(std::sync::atomic::Ordering::Relaxed) { "direct scanout: on\n" } else { "direct scanout: off\n" });
+            for oi in 0..d.outputs.len() {
+                let r = crate::render::scanout_check(d, oi, (256, 256));
+                out.push_str(&format!("{}: {}\n", d.outputs[oi].name, match r { Ok(_) => "yes", Err(e) => e }));
+            }
+        }
         // profile on|off: frame stages timed; profile: the table since the last one.
         "profile" => match rest.first().copied() {
             Some("on") => crate::prof::set(true),

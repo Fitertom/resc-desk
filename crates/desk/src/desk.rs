@@ -125,6 +125,10 @@ pub struct Desk {
     pub clip: crate::clipboard::Clip,
     /// Programs' notifications on screen, oldest first (toast.rs).
     pub toasts: Vec<crate::toast::Toast>,
+    /// Clients' buffers a monitor shows as they are (direct scanout, drm.rs), by
+    /// `Rc::as_ptr`: their release waits until they are off the screen (the client's
+    /// wl_buffer to release then, once it was let go).
+    pub on_screen: std::collections::HashMap<usize, Option<(crate::slab::Key, wl::ObjId)>>,
     /// Monitors: the Win+P panel, a reconfiguration to do (monitors.rs).
     pub mons: crate::monitors::State,
     /// Vulkan renderer; None: the CPU draws everything (gpu.rs `init`).

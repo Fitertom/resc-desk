@@ -1120,22 +1120,32 @@ fn apply_state(d: &mut Desk, sk: SKey, p: Pending) {
     let s = &mut d.surfaces[sk];
     let (old_w, old_h) = (s.w, s.h);
     let mut new_content = false;
+    let ck0 = s.client;
+    // A buffer still on a monitor (direct scanout) is released once it is off it.
+    let mut held: Vec<(usize, ObjId)> = Vec::new();
     match p.attach {
         Attach::Keep => {}
         Attach::Detach => {
-            if let Some((_, obj)) = s.buffer.take() {
-                release.push(obj);
+            if let Some((ob, obj)) = s.buffer.take() {
+                held.push((Rc::as_ptr(&ob) as usize, obj));
             }
         }
         Attach::Buffer(b, obj) => {
-            if let Some((_, old)) = s.buffer.replace((b, obj)) {
+            if let Some((ob, old)) = s.buffer.replace((b, obj)) {
                 if old != obj {
-                    release.push(old);
+                    held.push((Rc::as_ptr(&ob) as usize, old));
                 }
             }
             new_content = true;
         }
     }
+    for (key, obj) in held {
+        match d.on_screen.get_mut(&key) {
+            Some(slot) => *slot = Some((ck0, obj)),
+            None => release.push(obj),
+        }
+    }
+    let s = &mut d.surfaces[sk];
     if s.role == Role::Cursor && (p.dx != 0 || p.dy != 0) {
         d.seat.cursor_hotspot.0 -= p.dx;
         d.seat.cursor_hotspot.1 -= p.dy;
@@ -1242,10 +1252,23 @@ fn apply_state(d: &mut Desk, sk: SKey, p: Pending) {
     }
 }
 
+/// A held back wl_buffer.release (a buffer that was on a monitor, drm.rs).
+pub fn send_release(d: &mut Desk, ck: CKey, obj: ObjId) {
+    if let Some(c) = d.clients.get_mut(ck) {
+        if c.obj(obj).map_or(false, |o| o.iface == Iface::WlBuffer) {
+            wl_buffer::evt::release(&mut c.conn, obj);
+        }
+    }
+}
+
 pub fn release_buffer(d: &mut Desk, sk: SKey) {
     let Some(s) = d.surfaces.get_mut(sk) else { return };
-    if let Some((_, obj)) = s.buffer.take() {
+    if let Some((b, obj)) = s.buffer.take() {
         let ck = s.client;
+        if let Some(slot) = d.on_screen.get_mut(&(Rc::as_ptr(&b) as usize)) {
+            *slot = Some((ck, obj));
+            return;
+        }
         if let Some(c) = d.clients.get_mut(ck) {
             if c.obj(obj).map_or(false, |o| o.iface == Iface::WlBuffer) {
                 wl_buffer::evt::release(&mut c.conn, obj);

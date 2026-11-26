@@ -582,7 +582,12 @@ pub fn render_output(d: &mut Desk, oi: usize, cv: &mut Canvas, damage: &Damage) 
         None => render_cpu(d, oi, cv, damage),
     };
     d.cursor_drawn = cursor_rect(d);
-    // Frame callbacks for every surface on this output.
+    frames_done(d, oi);
+    rects
+}
+
+/// Frame callbacks for every surface on output `oi` (a frame of it went out).
+pub fn frames_done(d: &mut Desk, oi: usize) {
     let now = d.now_ms();
     for item in &build_scene_m(d, oi, true) {
         if let Elem::Surface(sk) = item.elem {
@@ -595,7 +600,92 @@ pub fn render_output(d: &mut Desk, oi: usize, cv: &mut Canvas, damage: &Damage) 
     if let Some((ik, _)) = crate::dnd::icon_rect(d) {
         send_frame_done(d, ik, now);
     }
-    rects
+}
+
+/// Output `oi` shows nothing but one fullscreen window whose picture is a GPU buffer of the
+/// output's own size (a game): that buffer can go to the monitor as it is (drm.rs, direct
+/// scanout), no frame of ours drawn. Nothing of ours may be over it but the pointer, which
+/// then goes on the monitor's cursor plane (no bigger than `cursor_max` px).
+/// Direct scanout allowed (`RESC_SCANOUT=0` at start, `ctl scanout off|on` meanwhile).
+pub static SCANOUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn scanout_candidate(d: &Desk, oi: usize, cursor_max: (i32, i32)) -> Option<(SKey, std::rc::Rc<crate::shm::Buffer>)> {
+    scanout_check(d, oi, cursor_max).ok()
+}
+
+/// `scanout_candidate`, or why not (ctl scanout).
+pub fn scanout_check(d: &Desk, oi: usize, cursor_max: (i32, i32)) -> Result<(SKey, std::rc::Rc<crate::shm::Buffer>), &'static str> {
+    let o = d.outputs.get(oi).ok_or("no output")?;
+    let orect = o.rect();
+    let items = build_scene_m(d, oi, true);
+    // The topmost fullscreen window's own surface here: what is under it does not show.
+    let main = items.iter().rposition(|it| match (it.elem, it.win) {
+        (Elem::Surface(sk), Some(wk)) => d.windows.get(wk).is_some_and(|w| w.surf == sk && w.tile == Tile::Fullscreen && w.fullscreen_output == Some(oi)),
+        _ => false,
+    });
+    let i = main.ok_or("no fullscreen window here")?;
+    for it in &items[i + 1..] {
+        match it.elem {
+            Elem::Overlays | Elem::Cursor => {}
+            Elem::Taskbar(_) => return Err("the taskbar shows"),
+            Elem::Surface(o) => {
+                return Err(match d.surfaces.get(o) {
+                    Some(s) if s.role == Role::Popup => "a menu or popup shows over it",
+                    Some(s) if s.parent.is_some() => "a subsurface shows over it",
+                    _ => "another window shows over it",
+                })
+            }
+            _ => return Err("something shows over it"),
+        }
+    }
+    let (Elem::Surface(sk), Some(wk), rect) = (items[i].elem, items[i].win, items[i].rect) else { return Err("no window") };
+    let w = d.windows.get(wk).ok_or("not a window")?;
+    if w.morph.is_some() {
+        return Err("the window is animating");
+    }
+    if rect != orect {
+        return Err("the window does not cover the monitor exactly");
+    }
+    let s = d.surfaces.get(sk).ok_or("no surface")?;
+    if s.vp_src.is_some() || s.vp_dst.is_some() {
+        return Err("the window's picture is scaled (viewport)");
+    }
+    let (b, _) = s.buffer.as_ref().ok_or("no buffer")?;
+    let dm = b.dmabuf.as_ref().ok_or("its buffer is shared memory, not a GPU buffer")?;
+    if b.w != o.pw || b.h != o.ph {
+        return Err("its buffer is not the monitor's size");
+    }
+    if dm.y_invert {
+        return Err("its buffer is upside down");
+    }
+    // Ours over it: only the pointer, small enough for the cursor plane.
+    let xf = Xf::new(o.x, o.y, o.scale);
+    let cur = xf.r(cursor_rect(d));
+    if cur.w > cursor_max.0 || cur.h > cursor_max.1 {
+        return Err("the pointer is bigger than the cursor plane");
+    }
+    let ext = layer_extents(d, oi);
+    if !ext[0].is_empty() || ext[1].iter().any(|r| !r.intersect(&Rect::new(0, 0, o.pw, o.ph)).is_empty() && !cur.contains_rect(r)) {
+        return Err("something of ours shows over it");
+    }
+    if !shell::glass_panels(d, oi).is_empty() {
+        return Err("glass of ours shows over it");
+    }
+    Ok((sk, b.clone()))
+}
+
+/// The pointer (and a dragged icon) as on output `oi`, into `cv` whose (0, 0) is the cursor's
+/// top left: for the monitor's cursor plane. Returns its physical rect on the output.
+pub fn draw_cursor_plane(d: &Desk, oi: usize, cv: &mut Canvas) -> Rect {
+    let o = &d.outputs[oi];
+    let xf = Xf::new(o.x, o.y, o.scale);
+    let cur = xf.r(cursor_rect(d));
+    let b = cv.bounds();
+    cv.clear(b);
+    if !cur.is_empty() {
+        draw_cursor(d, xf.shifted(cur.x, cur.y), cv, b);
+    }
+    cur
 }
 
 /// The CPU path: everything, glass included, into `cv`.

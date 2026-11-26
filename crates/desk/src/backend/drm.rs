@@ -4,8 +4,15 @@
 //! write-combined video memory crawls) and only what changed is copied to the buffer being
 //! flipped in, together with what that buffer missed while the other was shown.
 //!
-//! Legacy modesetting (SETCRTC + PAGE_FLIP) works on every driver; atomic, planes, a
-//! hardware cursor and direct scanout of GPU frames come later (README, item 3).
+//! Legacy modesetting (SETCRTC + PAGE_FLIP) works on every driver.
+//!
+//! Direct scanout: when a monitor shows nothing but one fullscreen window whose picture is a
+//! GPU buffer of the monitor's size (a game; render.rs `scanout_candidate`), that buffer is
+//! made a framebuffer (PRIME import + ADDFB2 with its modifier) and flipped in as it is: no
+//! frame drawn, read back or copied. The pointer goes on the CRTC's cursor plane meanwhile.
+//! The client's buffer is released only once it is off the screen (Desk::on_screen). When
+//! the monitor cannot show the buffer (its layout), it is composited as before.
+//! `RESC_SCANOUT=0` turns it off.
 //!
 //! Each monitor's settings (monitors.rs) go on here: its mode, on or off, turned (the
 //! frame is drawn upright and turned on the way into the buffer), a mirror of another one
@@ -41,6 +48,18 @@ const OBJ_GETPROPERTIES: u64 = ioc(RW, D, 0xB9, 32);
 const OBJ_SETPROPERTY: u64 = ioc(RW, D, 0xBA, 24);
 const CREATEPROPBLOB: u64 = ioc(RW, D, 0xBD, 16);
 const DESTROYPROPBLOB: u64 = ioc(RW, D, 0xBE, 4);
+const PRIME_FD_TO_HANDLE: u64 = ioc(RW, D, 0x2e, 12);
+const GEM_CLOSE: u64 = ioc(IOC_WRITE, D, 0x09, 8);
+const ADDFB2: u64 = ioc(RW, D, 0xB8, 104);
+const CURSOR: u64 = ioc(RW, D, 0xA3, 28);
+const CAP_CURSOR_WIDTH: u64 = 8;
+const CAP_CURSOR_HEIGHT: u64 = 9;
+const FB_MODIFIERS: u32 = 2;
+const MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
+const CURSOR_BO: u32 = 1;
+const CURSOR_MOVE: u32 = 2;
+/// Scanout tried and refused this many times on a monitor: it composites from then on.
+const SCAN_TRIES: u32 = 4;
 const OBJ_CRTC: u32 = 0xcccc_cccc;
 const OBJ_CONNECTOR: u32 = 0xc0c0_c0c0;
 const PROP_ENUM: u32 = 1 << 3;
@@ -154,6 +173,58 @@ struct PageFlip {
     flags: u32,
     reserved: u32,
     user_data: u64,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct PrimeHandle {
+    handle: u32,
+    flags: u32,
+    fd: i32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct FbCmd2 {
+    fb_id: u32,
+    width: u32,
+    height: u32,
+    pixel_format: u32,
+    flags: u32,
+    handles: [u32; 4],
+    pitches: [u32; 4],
+    offsets: [u32; 4],
+    modifier: [u64; 4],
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct CursorCmd {
+    flags: u32,
+    crtc_id: u32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    handle: u32,
+}
+
+/// A client's buffer made a framebuffer (fb 0: the monitor cannot take it).
+struct ScanFb {
+    buf: std::rc::Weak<crate::shm::Buffer>,
+    fb: u32,
+    handles: Vec<u32>,
+}
+
+/// The CRTC's cursor plane while a buffer is scanned out: a dumb buffer we draw the pointer
+/// into, what it shows and where.
+struct HwCursor {
+    handle: u32,
+    pitch: u32,
+    map: sys::Mmap,
+    img: Vec<u32>,
+    at: Rect,
+    on: bool,
 }
 
 #[repr(C)]
@@ -345,6 +416,13 @@ pub struct Monitor {
     hdr_blob: u32,
     /// Flips asked for with older buffers are let go by (bumped whenever they change).
     gen: u32,
+    /// Direct scanout: the client buffer on screen now (None: one of ours), the one a
+    /// pending flip brings (Some(None): ours), whether frames are scanned out, refusals.
+    shown: Option<usize>,
+    pending_scan: Option<Option<usize>>,
+    scanning: bool,
+    scan_fails: u32,
+    cursor: Option<HwCursor>,
 }
 
 impl Monitor {
@@ -479,6 +557,10 @@ pub struct Drm {
     pub paused: bool,
     /// The output kept with no monitor behind it (all unplugged).
     pub orphan: Option<u32>,
+    /// Clients' buffers made framebuffers, by `Rc::as_ptr` (direct scanout).
+    fbs: HashMap<usize, ScanFb>,
+    /// The cursor plane's size.
+    cursor_max: (i32, i32),
 }
 
 impl Drm {
@@ -520,7 +602,12 @@ impl Drm {
         if cap[1] == 0 {
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no dumb buffers"));
         }
-        let mut drm = Drm { fd, path: path.to_string(), mons: Vec::new(), paused: false, orphan: None };
+        let cap_of = |c: u64| {
+            let mut v = [c, 0u64];
+            unsafe { ioctl_ptr(raw, GET_CAP, v.as_mut_ptr()) }.ok().map(|_| v[1] as i32).filter(|v| *v > 0 && *v <= 512)
+        };
+        let cursor_max = (cap_of(CAP_CURSOR_WIDTH).unwrap_or(64), cap_of(CAP_CURSOR_HEIGHT).unwrap_or(64));
+        let mut drm = Drm { fd, path: path.to_string(), mons: Vec::new(), paused: false, orphan: None, fbs: HashMap::new(), cursor_max };
         drm.scan()?;
         Ok(drm)
     }
@@ -646,6 +733,11 @@ impl Drm {
             bufs,
             front: 0,
             flip_pending: false,
+            shown: None,
+            pending_scan: None,
+            scanning: false,
+            scan_fails: 0,
+            cursor: None,
             set: false,
             saved,
             shadow: vec![0xff00_0000; (w * h) as usize],
@@ -750,9 +842,29 @@ impl Drm {
             d.outputs[oi].frame_pending = true;
             return;
         }
-        let dmg = super::take_damage(d, oi);
+        self.gc_fbs();
+        if self.can_scan(mi) {
+            if let Some((_, buf)) = crate::render::scanout_candidate(d, oi, self.cursor_max) {
+                if self.scanout(d, oi, mi, buf) {
+                    return;
+                }
+            }
+        }
+        // Back from scanout: our buffers are stale, the whole frame is drawn again.
+        let leaving = std::mem::take(&mut self.mons[mi].scanning);
+        if leaving {
+            eprintln!("drm: {}: direct scanout off", self.mons[mi].name);
+            self.cursor_off(mi);
+        }
+        let mut dmg = super::take_damage(d, oi);
         let m = &mut self.mons[mi];
         let (ow, oh) = m.dims();
+        if leaving {
+            dmg.add(Rect::new(0, 0, ow, oh));
+            for b in &mut m.bufs {
+                b.missed.add(Rect::new(0, 0, m.w.max(m.h), m.w.max(m.h)));
+            }
+        }
         if m.shadow.len() != (ow * oh) as usize {
             m.shadow = vec![0xff00_0000; (ow * oh) as usize];
         }
@@ -812,6 +924,8 @@ impl Drm {
             m.front = back;
             m.gen += 1;
             m.flip_pending = false;
+            m.shown = None;
+            m.pending_scan = None;
             return match unsafe { ioctl_ptr(raw, SETCRTC, &mut req) } {
                 Ok(_) => {
                     m.set = true;
@@ -828,6 +942,7 @@ impl Drm {
         match unsafe { ioctl_ptr(raw, PAGE_FLIP, &mut flip) } {
             Ok(_) => {
                 m.flip_pending = true;
+                m.pending_scan = Some(None);
                 true
             }
             Err(e) => {
@@ -1009,6 +1124,9 @@ impl Drm {
                         m.front = 0;
                         m.gen += 1;
                         m.flip_pending = false;
+                        m.shown = None;
+                        m.pending_scan = None;
+                        m.scan_fails = 0;
                         for b in old {
                             self.free_buf(b);
                         }
@@ -1111,7 +1229,12 @@ impl Drm {
                     let (mi, gen) = ((user & 0xffff_ffff) as usize, (user >> 32) as u32);
                     if let Some(m) = self.mons.get_mut(mi).filter(|m| m.gen == gen && m.flip_pending) {
                         m.flip_pending = false;
-                        m.front = 1 - m.front;
+                        // Ours flipped in, or a client's buffer (ours then stay as they were).
+                        let came = m.pending_scan.take().flatten();
+                        if came.is_none() {
+                            m.front = 1 - m.front;
+                        }
+                        m.shown = came;
                         if m.out_id != 0 {
                             if let Some(oi) = d.output_index(m.out_id) {
                                 d.outputs[oi].frame_pending = false;
@@ -1126,6 +1249,215 @@ impl Drm {
                 }
                 at += len;
             }
+            self.release_off_screen(d);
+        }
+    }
+
+    // -------------------------------------------------------------- direct scanout
+
+    fn can_scan(&self, mi: usize) -> bool {
+        let m = &self.mons[mi];
+        let mirrored = self.mons.iter().any(|x| x.role == Role::Mirror(m.name.clone()));
+        crate::render::SCANOUT.load(std::sync::atomic::Ordering::Relaxed) && m.set && m.rot == 0 && !m.deep && m.role == Role::Show && !mirrored && m.scan_fails < SCAN_TRIES
+    }
+
+    /// Client buffer `buf` flipped in on monitor `mi` (output `oi`) as it is. False: it
+    /// cannot be (the frame is drawn as usual then).
+    fn scanout(&mut self, d: &mut Desk, oi: usize, mi: usize, buf: std::rc::Rc<crate::shm::Buffer>) -> bool {
+        let key = std::rc::Rc::as_ptr(&buf) as usize;
+        if !self.fbs.contains_key(&key) {
+            let f = self.import(&buf);
+            self.fbs.insert(key, f);
+        }
+        let fb = self.fbs[&key].fb;
+        if fb == 0 {
+            self.mons[mi].scan_fails += 1;
+            return false;
+        }
+        let raw = self.fd.as_raw_fd();
+        let _ = super::take_damage(d, oi);
+        if !self.mons[mi].scanning {
+            eprintln!("drm: {}: direct scanout on", self.mons[mi].name);
+            self.mons[mi].scanning = true;
+        }
+        self.cursor_plane(d, oi, mi);
+        let m = &mut self.mons[mi];
+        if m.shown == Some(key) {
+            // That picture is up already (only the pointer moved).
+            d.outputs[oi].frame_pending = false;
+            crate::render::frames_done(d, oi);
+            return true;
+        }
+        let user = mi as u64 | (m.gen as u64) << 32;
+        let mut flip = PageFlip { crtc_id: m.crtc, fb_id: fb, flags: PAGE_FLIP_EVENT, user_data: user, ..Default::default() };
+        match unsafe { ioctl_ptr(raw, PAGE_FLIP, &mut flip) } {
+            Ok(_) => {
+                m.flip_pending = true;
+                m.pending_scan = Some(Some(key));
+                d.on_screen.entry(key).or_insert(None);
+                if crate::prof::on() {
+                    let now = std::time::Instant::now();
+                    if let Some(t) = m.last_present {
+                        crate::prof::add(&format!("{} frame gap", d.outputs[oi].name), (now - t).as_secs_f64() * 1000.0);
+                    }
+                    m.last_present = Some(now);
+                    crate::prof::add(&format!("{} scanout", d.outputs[oi].name), 0.0);
+                }
+                d.outputs[oi].frames += 1;
+                d.outputs[oi].frame_pending = true;
+                crate::render::frames_done(d, oi);
+                true
+            }
+            Err(e) => {
+                eprintln!("drm: {}: scanout flip refused ({e}): composited", m.name);
+                m.scan_fails += 1;
+                if let Some(f) = self.fbs.get_mut(&key) {
+                    let mut id = f.fb;
+                    let _ = unsafe { ioctl_ptr(raw, RMFB, &mut id) };
+                    f.fb = 0;
+                }
+                false
+            }
+        }
+    }
+
+    /// A client's dma-buf as a framebuffer (fb 0 when the card cannot show it).
+    fn import(&self, b: &std::rc::Rc<crate::shm::Buffer>) -> ScanFb {
+        let raw = self.fd.as_raw_fd();
+        let mut out = ScanFb { buf: std::rc::Rc::downgrade(b), fb: 0, handles: Vec::new() };
+        let Some(dm) = b.dmabuf.as_ref() else { return out };
+        let format = match dm.format {
+            crate::dmabuf::ARGB8888 | crate::dmabuf::XRGB8888 => crate::dmabuf::XRGB8888,
+            crate::dmabuf::ABGR8888 | crate::dmabuf::XBGR8888 => crate::dmabuf::XBGR8888,
+            _ => return out,
+        };
+        let mut cmd = FbCmd2 { width: dm.w as u32, height: dm.h as u32, pixel_format: format, ..Default::default() };
+        for (i, p) in dm.planes.iter().enumerate().take(4) {
+            let mut ph = PrimeHandle { fd: p.fd.as_raw_fd(), ..Default::default() };
+            if let Err(e) = unsafe { ioctl_ptr(raw, PRIME_FD_TO_HANDLE, &mut ph) } {
+                eprintln!("drm: scanout: importing a buffer: {e}");
+                self.close_handles(&out.handles);
+                out.handles.clear();
+                return out;
+            }
+            if !out.handles.contains(&ph.handle) {
+                out.handles.push(ph.handle);
+            }
+            cmd.handles[i] = ph.handle;
+            cmd.pitches[i] = p.stride;
+            cmd.offsets[i] = p.offset;
+            if dm.modifier != MOD_INVALID {
+                cmd.modifier[i] = dm.modifier;
+            }
+        }
+        if dm.modifier != MOD_INVALID {
+            cmd.flags = FB_MODIFIERS;
+        }
+        match unsafe { ioctl_ptr(raw, ADDFB2, &mut cmd) } {
+            Ok(_) => out.fb = cmd.fb_id,
+            Err(e) => {
+                eprintln!("drm: scanout: {}x{} buffer (modifier {:#x}) is no framebuffer: {e}", dm.w, dm.h, dm.modifier);
+                self.close_handles(&out.handles);
+                out.handles.clear();
+            }
+        }
+        out
+    }
+
+    fn close_handles(&self, hs: &[u32]) {
+        let raw = self.fd.as_raw_fd();
+        for h in hs {
+            let mut c = [*h, 0u32];
+            let _ = unsafe { ioctl_ptr(raw, GEM_CLOSE, c.as_mut_ptr()) };
+        }
+    }
+
+    /// Framebuffers of buffers that are gone and off every screen.
+    fn gc_fbs(&mut self) {
+        let live: Vec<usize> = self.mons.iter().flat_map(|m| [m.shown, m.pending_scan.flatten()]).flatten().collect();
+        let dead: Vec<usize> = self.fbs.iter().filter(|(k, f)| f.buf.strong_count() == 0 && !live.contains(k)).map(|(k, _)| *k).collect();
+        let raw = self.fd.as_raw_fd();
+        for k in dead {
+            if let Some(f) = self.fbs.remove(&k) {
+                if f.fb != 0 {
+                    let mut id = f.fb;
+                    let _ = unsafe { ioctl_ptr(raw, RMFB, &mut id) };
+                }
+                self.close_handles(&f.handles);
+            }
+        }
+    }
+
+    /// Clients' buffers no monitor shows any more: their held back releases go out.
+    fn release_off_screen(&mut self, d: &mut Desk) {
+        let live: Vec<usize> = self.mons.iter().flat_map(|m| [m.shown, m.pending_scan.flatten()]).flatten().collect();
+        let gone: Vec<usize> = d.on_screen.keys().copied().filter(|k| !live.contains(k)).collect();
+        for k in gone {
+            if let Some(Some((ck, obj))) = d.on_screen.remove(&k) {
+                crate::server::send_release(d, ck, obj);
+            }
+        }
+    }
+
+    /// The pointer on monitor `mi`'s cursor plane (drawn as on output `oi`).
+    fn cursor_plane(&mut self, d: &Desk, oi: usize, mi: usize) {
+        let raw = self.fd.as_raw_fd();
+        let (cw, ch) = self.cursor_max;
+        if self.mons[mi].cursor.is_none() {
+            let mut c = CreateDumb { width: cw as u32, height: ch as u32, bpp: 32, ..Default::default() };
+            if unsafe { ioctl_ptr(raw, CREATE_DUMB, &mut c) }.is_err() {
+                return;
+            }
+            let mut mp = MapDumb { handle: c.handle, ..Default::default() };
+            if unsafe { ioctl_ptr(raw, MAP_DUMB, &mut mp) }.is_err() {
+                return;
+            }
+            let Ok(map) = sys::Mmap::map_at(self.fd.as_fd(), c.size as usize, mp.offset, true, true) else { return };
+            self.mons[mi].cursor = Some(HwCursor { handle: c.handle, pitch: c.pitch, map, img: Vec::new(), at: Rect::default(), on: false });
+        }
+        let mut img = vec![0u32; (cw * ch) as usize];
+        let at = {
+            let mut cv = crate::render::Canvas { px: &mut img, w: cw, h: ch, stride: cw as usize };
+            crate::render::draw_cursor_plane(d, oi, &mut cv)
+        };
+        let crtc = self.mons[mi].crtc;
+        let Some(c) = self.mons[mi].cursor.as_mut() else { return };
+        if at.is_empty() {
+            if c.on {
+                let mut cmd = CursorCmd { flags: CURSOR_BO, crtc_id: crtc, ..Default::default() };
+                let _ = unsafe { ioctl_ptr(raw, CURSOR, &mut cmd) };
+                c.on = false;
+            }
+            return;
+        }
+        let changed = img != c.img;
+        if changed {
+            for y in 0..ch as usize {
+                unsafe { std::ptr::copy_nonoverlapping(img.as_ptr().add(y * cw as usize), c.map.ptr.add(y * c.pitch as usize) as *mut u32, cw as usize) };
+            }
+            c.img = img;
+        }
+        if changed || !c.on {
+            let mut cmd = CursorCmd { flags: CURSOR_BO | CURSOR_MOVE, crtc_id: crtc, x: at.x, y: at.y, width: cw as u32, height: ch as u32, handle: c.handle };
+            if unsafe { ioctl_ptr(raw, CURSOR, &mut cmd) }.is_ok() {
+                c.on = true;
+                c.at = at;
+            }
+        } else if (at.x, at.y) != (c.at.x, c.at.y) {
+            let mut cmd = CursorCmd { flags: CURSOR_MOVE, crtc_id: crtc, x: at.x, y: at.y, ..Default::default() };
+            let _ = unsafe { ioctl_ptr(raw, CURSOR, &mut cmd) };
+            c.at = at;
+        }
+    }
+
+    fn cursor_off(&mut self, mi: usize) {
+        let raw = self.fd.as_raw_fd();
+        let crtc = self.mons[mi].crtc;
+        if let Some(c) = self.mons[mi].cursor.as_mut().filter(|c| c.on) {
+            let mut cmd = CursorCmd { flags: CURSOR_BO, crtc_id: crtc, ..Default::default() };
+            let _ = unsafe { ioctl_ptr(raw, CURSOR, &mut cmd) };
+            c.on = false;
+            c.img.clear();
         }
     }
 
@@ -1145,6 +1477,13 @@ impl Drm {
             m.set = false;
             m.flip_pending = false;
             m.gen += 1;
+            m.shown = None;
+            m.pending_scan = None;
+            m.scanning = false;
+            if let Some(c) = m.cursor.as_mut() {
+                c.on = false;
+                c.img.clear();
+            }
             for b in &mut m.bufs {
                 b.missed.add(ALL);
             }
@@ -1261,6 +1600,15 @@ pub fn add_output(d: &mut Desk, m: &Monitor, card: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scanout_ioctl_structs_are_the_kernels_layout() {
+        use super::*;
+        assert_eq!(std::mem::size_of::<FbCmd2>(), 104);
+        assert_eq!(std::mem::size_of::<CursorCmd>(), 28);
+        assert_eq!(std::mem::size_of::<PrimeHandle>(), 12);
+        assert_eq!(std::mem::offset_of!(FbCmd2, modifier), 72);
+    }
 
     #[test]
     fn hdr_is_read_from_the_edid() {
