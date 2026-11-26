@@ -378,6 +378,8 @@ pub struct Window {
     pub fullscreen_output: Option<usize>,
     /// The X window behind it (an X program through Xwayland, xwm.rs); 0 for Wayland ones.
     pub x11: u32,
+    /// A program's notification (toast.rs): bottom right, over the windows, no focus.
+    pub toast: bool,
 }
 
 impl Window {

@@ -352,6 +352,15 @@ fn window_glass(d: &Desk, wk: WKey, xf: Xf, before: usize) -> Option<GlassOp> {
         return None;
     }
     let w = d.windows.get(wk)?;
+    if w.toast {
+        // A notification: a rim of glass around it.
+        let f = crate::wm::frame_rect(d, wk)?.inflate(crate::toast::RIM);
+        let s = xf.scale as f32;
+        let g = crate::look::glass(crate::look::Place::of_app(&w.app_id));
+        let tint = crate::glass::tint_at(TINT_WINDOW, g.dim);
+        let r = crate::toast::RADIUS as f32 * s;
+        return Some(GlassOp { rect: xf.r(f), radii: [r; 4], layer: 0, before, tint, bezel: g.bezel * s, panel: false, cover: [Rect::default(); 2], drop: None, sigma: g.blur * s, ..Default::default() });
+    }
     if !w.ssd || w.tile == crate::state::Tile::Fullscreen {
         return None;
     }
@@ -1638,6 +1647,20 @@ impl Gpu {
                     }
                 }
                 GpuItem::Surface(sk, r, round, _) => {
+                    // A notification (no frame of ours): its rim of glass under its first
+                    // surface, its corners rounded inside the rim.
+                    let toast = win.filter(|k| d.windows.get(*k).is_some_and(|w| w.toast));
+                    let mut round = round;
+                    if let Some(wk) = toast {
+                        if !frames_seen.contains(&wk) {
+                            frames_seen.push(wk);
+                            if let Some(op) = window_glass(d, wk, xf, draws.len()) {
+                                zones.push((op.rect, op.cover));
+                                win_ops.push(op);
+                            }
+                        }
+                        round = crate::wm::frame_rect(d, wk).map(|f| (f, crate::toast::RADIUS - crate::toast::RIM));
+                    }
                     // Moving: opaque all the way, stretched with the drop, each axis on its own.
                     let (dst, round) = match &pose {
                         Some(p) => (p.map_px(xf, r), p.clip_px(xf)),

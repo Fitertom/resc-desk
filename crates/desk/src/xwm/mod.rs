@@ -826,7 +826,7 @@ impl Xwm {
         let a = &self.a;
         let Some(xw) = self.wins.get(&w) else { return false };
         let bare = [a.type_splash, a.type_dock, a.type_notification, a.type_dnd];
-        xw.decorated && !xw.types.iter().any(|t| bare.contains(t))
+        xw.decorated && !xw.types.iter().any(|t| bare.contains(t)) && !crate::toast::is_toast(&xw.title, false)
     }
 
     /// A menu, tooltip or the like: sits over its program's window, no frame, no focus.
@@ -878,6 +878,8 @@ impl Xwm {
         // or fullscreen one stays as it is. Either way it hears where it is now.
         if d.windows[wk].tile == Tile::Floating {
             let (cw, ch) = xw.sent_size;
+            // A notification's place is ours (toast.rs): only its size is taken.
+            let mask = if d.windows[wk].toast { mask & !(x11::CW_X | x11::CW_Y) } else { mask };
             let size = (if mask & x11::CW_WIDTH != 0 { rw.max(1) } else { cw }, if mask & x11::CW_HEIGHT != 0 { rh.max(1) } else { ch });
             if size != (cw, ch) {
                 d.windows[wk].last_cfg = (size.0, size.1, vec![]);
@@ -936,7 +938,8 @@ impl Xwm {
                 }
             }
         } else if ty == a.net_active_window {
-            if let Some(k) = wk {
+            // A notification asking for focus does not take it.
+            if let Some(k) = wk.filter(|k| !d.windows[*k].toast) {
                 crate::wm::unminimize(d, k);
             }
         } else if ty == a.net_wm_moveresize {
@@ -1023,7 +1026,15 @@ impl Xwm {
         let ck = d.surfaces[sk].client;
         crate::wm::create_window(d, ck, sk, 0);
         let Role::Toplevel(wk) = d.surfaces[sk].role else { return };
-        let ssd = self.decorated(w) && !self.wins[&w].or;
+        let toast = {
+            let xw = &self.wins[&w];
+            crate::toast::is_toast(&xw.title, xw.types.contains(&self.a.type_notification))
+        };
+        {
+            let xw = &self.wins[&w];
+            eprintln!("xwm: window {:#x} class={:?} title={:?} or={} types={} geo={:?}{}", w, xw.class, xw.title, xw.or, xw.types.len(), xw.geo, if toast { " → notification" } else { "" });
+        }
+        let ssd = self.decorated(w) && !self.wins[&w].or && !toast;
         let parent = self.wins.get(&self.wins[&w].transient).and_then(|t| t.wk).filter(|k| d.windows.contains(*k));
         let xw = self.wins.get_mut(&w).unwrap();
         xw.wk = Some(wk);
@@ -1037,6 +1048,7 @@ impl Xwm {
         win.max_size = xw.max;
         win.parent = parent;
         win.ssd = ssd;
+        win.toast = toast;
         // No xdg handshake: it is shown as soon as it has a picture.
         let s = &mut d.surfaces[sk];
         s.xdg_initial_sent = true;

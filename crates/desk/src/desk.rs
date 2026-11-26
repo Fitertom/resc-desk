@@ -123,6 +123,8 @@ pub struct Desk {
     pub shot_crop: Option<Rect>,
     pub wall: crate::wallpaper::Wall,
     pub clip: crate::clipboard::Clip,
+    /// Programs' notifications on screen, oldest first (toast.rs).
+    pub toasts: Vec<crate::toast::Toast>,
     /// Monitors: the Win+P panel, a reconfiguration to do (monitors.rs).
     pub mons: crate::monitors::State,
     /// Vulkan renderer; None: the CPU draws everything (gpu.rs `init`).

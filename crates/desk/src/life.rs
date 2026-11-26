@@ -477,7 +477,7 @@ pub fn bar(d: &Desk) -> Vec<(Key, f32, f32)> {
     let mut wins: Vec<WKey> = d
         .windows
         .iter()
-        .filter(|(_, w)| w.workspace == d.workspace && d.surfaces.get(w.surf).map_or(false, |s| s.mapped) && w.parent.is_none() && !w.desktop())
+        .filter(|(_, w)| w.workspace == d.workspace && d.surfaces.get(w.surf).map_or(false, |s| s.mapped) && w.parent.is_none() && !w.desktop() && !w.toast)
         .map(|(k, _)| k)
         .collect();
     let mut v = Vec::with_capacity(wins.len() + 2);

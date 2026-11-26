@@ -341,7 +341,7 @@ pub fn output_covered(d: &Desk, oi: usize) -> bool {
     let or = o.rect();
     for wk in wm::visible_stack(d).into_iter().rev() {
         let w = &d.windows[wk];
-        if w.desktop() || w.minimized {
+        if w.desktop() || w.minimized || w.toast {
             continue;
         }
         let g = d.surfaces.get(w.surf).map(|s| s.geom()).unwrap_or_default();
@@ -365,7 +365,7 @@ fn bar_place_free(d: &Desk, oi: usize) -> bool {
     let or = Rect::new(r.x, r.y1() - TASKBAR_H, r.w, TASKBAR_H);
     !wm::visible_stack(d).into_iter().any(|wk| {
         let w = &d.windows[wk];
-        !w.desktop() && !w.minimized && w.parent.is_none() && wm::frame_rect(d, wk).or_else(|| d.surfaces.get(w.surf).map(|s| Rect::new(w.x, w.y, s.geom().w, s.geom().h))).is_some_and(|r| r.overlaps(&or))
+        !w.desktop() && !w.minimized && !w.toast && w.parent.is_none() && wm::frame_rect(d, wk).or_else(|| d.surfaces.get(w.surf).map(|s| Rect::new(w.x, w.y, s.geom().w, s.geom().h))).is_some_and(|r| r.overlaps(&or))
     })
 }
 
@@ -1416,6 +1416,7 @@ pub fn tick(d: &mut Desk) -> bool {
     moving |= crate::boot::tick(d, dt as f32);
     moving |= crate::osd::tick(d, dt as f32);
     moving |= crate::clipboard::tick(d, dt as f32);
+    moving |= crate::toast::tick(d, dt as f32);
     moving |= lens_tick(d, dt as f32);
     moving
 }
@@ -1564,7 +1565,7 @@ pub fn switcher_step(d: &mut Desk, dir: i32) {
                 .mru
                 .iter()
                 .copied()
-                .filter(|k| d.windows[*k].workspace == d.workspace && !d.windows[*k].desktop() && d.surfaces.get(d.windows[*k].surf).map_or(false, |s| s.mapped))
+                .filter(|k| d.windows[*k].workspace == d.workspace && !d.windows[*k].desktop() && !d.windows[*k].toast && d.surfaces.get(d.windows[*k].surf).map_or(false, |s| s.mapped))
                 .collect();
             (l, dir)
         }

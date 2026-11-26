@@ -39,6 +39,7 @@ pub fn create_window(d: &mut Desk, ck: CKey, sk: SKey, toplevel: ObjId) {
         output: out,
         fullscreen_output: None,
         x11: 0,
+        toast: false,
     });
     d.surfaces[sk].role = Role::Toplevel(wk);
 }
@@ -369,6 +370,19 @@ fn map_window(d: &mut Desk, wk: WKey) {
         update_window_outputs(d, wk);
         return;
     }
+    if d.windows[wk].toast {
+        // A notification: bottom right, rising; focus stays where it is.
+        d.stack.retain(|k| *k != wk);
+        d.stack.push(wk);
+        d.windows[wk].minimized = false;
+        crate::toast::mapped(d, wk);
+        damage_window(d, wk);
+        update_window_outputs(d, wk);
+        if d.windows[wk].x11 != 0 {
+            crate::xwm::window_mapped(d, wk);
+        }
+        return;
+    }
     if !d.windows[wk].placed {
         place_window(d, wk);
     }
@@ -478,14 +492,14 @@ pub fn destroy_window(d: &mut Desk, wk: WKey) {
 
 /// The windows of the current workspace that are shown, bottom → top.
 pub fn visible_stack(d: &Desk) -> Vec<WKey> {
-    d.stack
-        .iter()
-        .copied()
-        .filter(|k| {
-            let w = &d.windows[*k];
-            (w.workspace == d.workspace || w.desktop()) && !w.minimized && d.surfaces.get(w.surf).map_or(false, |s| s.mapped)
-        })
-        .collect()
+    let shown = |k: &WKey| {
+        let w = &d.windows[*k];
+        (w.workspace == d.workspace || w.desktop() || w.toast) && !w.minimized && d.surfaces.get(w.surf).map_or(false, |s| s.mapped)
+    };
+    // Notifications over every window.
+    let mut v: Vec<WKey> = d.stack.iter().copied().filter(|k| shown(k) && !d.windows[*k].toast).collect();
+    v.extend(d.stack.iter().copied().filter(|k| shown(k) && d.windows[*k].toast));
+    v
 }
 
 pub fn focus_top(d: &mut Desk) {

@@ -1,6 +1,7 @@
 //! resc-desk: a Wayland compositor + desktop shell written from scratch in Rust.
 mod anim;
 mod prof;
+mod toast;
 mod xcursor;
 mod apps;
 mod backend;
@@ -246,6 +247,7 @@ fn main() {
         shot_crop: None,
         wall: Default::default(),
         clip: Default::default(),
+        toasts: Vec::new(),
         mons: Default::default(),
         gpu: None,
         bench: Default::default(),
