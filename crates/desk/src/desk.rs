@@ -117,6 +117,8 @@ pub struct Desk {
     pub calib: Option<crate::layout::Calib>,
     /// Win+Shift+S (snip.rs).
     pub snip: crate::snip::Snip,
+    /// The volume keys' slider (osd.rs).
+    pub osd: crate::osd::Osd,
     /// Logical crop for the next "all" screenshot (IPC).
     pub shot_crop: Option<Rect>,
     pub wall: crate::wallpaper::Wall,

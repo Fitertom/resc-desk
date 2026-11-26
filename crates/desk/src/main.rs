@@ -38,6 +38,7 @@ mod screencopy;
 mod shell;
 mod shm;
 mod snip;
+mod osd;
 mod slab;
 mod boot;
 mod life;
@@ -239,6 +240,7 @@ fn main() {
         mm_origin: (0.0, 0.0),
         calib: None,
         snip: Default::default(),
+        osd: Default::default(),
         shot_crop: None,
         wall: Default::default(),
         clip: Default::default(),
@@ -318,6 +320,9 @@ fn main() {
     }
     // Screen sharing: the portal (started by D-Bus) must find this desktop.
     screencopy::setup_portal(&mut d);
+    if be.name() != "headless" {
+        bt::autoconnect();
+    }
     for c in spawn {
         d.spawn(&c);
     }

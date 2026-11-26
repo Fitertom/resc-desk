@@ -1027,10 +1027,12 @@ fn shortcut(d: &mut Desk, code: u32) -> bool {
     match code {
         key::MUTE => {
             crate::tray::toggle_mute(d, false);
+            crate::osd::show(d);
             return true;
         }
         key::VOLUMEDOWN | key::VOLUMEUP => {
             crate::tray::volume_step(d, if code == key::VOLUMEUP { 5 } else { -5 });
+            crate::osd::show(d);
             return true;
         }
         _ => {}

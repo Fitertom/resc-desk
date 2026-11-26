@@ -685,6 +685,9 @@ pub fn layer_extents(d: &Desk, oi: usize) -> [Vec<Rect>; 2] {
     if d.calib.is_some() || crate::snip::active(d) {
         ext[1].push(xf.r(o.rect()));
     }
+    if let Some(r) = crate::osd::rect(d).filter(|r| r.overlaps(&o.rect())) {
+        ext[1].push(xf.r(r));
+    }
     if let Some(r) = d.overlay.snap_preview {
         ext[1].push(xf.r(r).inflate(2));
     }

@@ -1305,6 +1305,7 @@ pub fn tick(d: &mut Desk) -> bool {
     moving |= crate::alttab::tick(d, dt as f32);
     moving |= crate::startanim::tick(d, dt as f32);
     moving |= crate::boot::tick(d, dt as f32);
+    moving |= crate::osd::tick(d, dt as f32);
     moving |= lens_tick(d, dt as f32);
     moving
 }
@@ -1669,6 +1670,7 @@ pub fn draw_overlays(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
     if glass_on_gpu() {
         crate::alttab::draw(d, oi, xf, cv, clip);
     }
+    crate::osd::draw(d, oi, xf, cv, clip);
     crate::snip::draw(d, oi, xf, cv, clip);
     draw_peek(d, oi, xf, cv, clip);
     // Over everything while the desk starts.

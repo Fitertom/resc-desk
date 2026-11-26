@@ -192,6 +192,51 @@ fn run(b: &mut Bus, st: &mut State, cmd: Cmd, tx: &Sender<State>) -> std::io::Re
     }
 }
 
+/// At start-up: the paired devices that are not connected (headphones left on, a mouse)
+/// are connected, so nobody has to open «Параметры» after a reboot. The adapter is powered
+/// on if it came up off. Devices that are switched off are tried again for two minutes
+/// (they may be switched on after the desktop), then left alone.
+pub fn autoconnect() {
+    std::thread::spawn(|| {
+        let start = std::time::Instant::now();
+        let mut done: Vec<String> = Vec::new();
+        let mut powered_once = false;
+        while start.elapsed() < Duration::from_secs(120) {
+            let mut b = match Bus::system() {
+                Ok(b) => b,
+                Err(_) => {
+                    std::thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
+            };
+            let mut st = State::default();
+            if read(&mut b, &mut st).is_ok() && st.missing.is_none() {
+                if !st.powered && !powered_once {
+                    powered_once = true;
+                    let _ = b.set_prop(BLUEZ, &st.adapter, "org.bluez.Adapter1", "Powered", Val::B(true));
+                    std::thread::sleep(Duration::from_secs(2));
+                    continue;
+                }
+                let todo: Vec<Dev> = st.devices.iter().filter(|d| d.paired && !d.connected && !done.contains(&d.path)).cloned().collect();
+                if st.powered && todo.is_empty() {
+                    return;
+                }
+                for dv in todo {
+                    let r = long(&mut b, |b| b.call(BLUEZ, &dv.path, "org.bluez.Device1", "Connect", &[]).map(|_| ()));
+                    match r {
+                        Ok(()) => {
+                            eprintln!("bluetooth: connected {} ({})", dv.name, dv.addr);
+                            done.push(dv.path.clone());
+                        }
+                        Err(e) => eprintln!("bluetooth: {} not connected yet: {e}", dv.name),
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_secs(10));
+        }
+    });
+}
+
 /// A call that may take a while (pairing, connecting): a longer reply timeout for it.
 fn long(b: &mut Bus, f: impl FnOnce(&mut Bus) -> std::io::Result<()>) -> std::io::Result<()> {
     b.set_timeout(Duration::from_secs(40));
