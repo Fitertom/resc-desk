@@ -352,6 +352,11 @@ fn main() {
     while d.running {
         let needs_paint = d.outputs.iter().any(|o| !o.frame_pending && (!o.damage.is_empty() || o.wants_frame));
         let timeout = if needs_paint { 0 } else if d.overlay.animating { 8 } else { -1 };
+        // Autoclickers and macros (mousebind.rs): woken for their next event.
+        let timeout = match mousebind::wait_ms(&d) {
+            Some(w) if timeout < 0 || w < timeout => w,
+            _ => timeout,
+        };
         if let Err(e) = d.ep.wait(timeout, &mut evs) {
             eprintln!("epoll: {e}");
             break;
@@ -392,6 +397,7 @@ fn main() {
             }
         }
         prof::since("loop: events", t_ev);
+        mousebind::tick(&mut d);
         let t_tick = std::time::Instant::now();
         d.overlay.animating = shell::tick(&mut d);
         prof::since("loop: tick", t_tick);

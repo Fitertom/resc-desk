@@ -66,7 +66,7 @@ const PAGES: [(Page, &str, &str); 8] = [
 ];
 
 /// «Мышь»: the actions to pick for a button (label, mousebind.rs action).
-const MOUSE_ACTS: [(&str, &str); 27] = [
+const MOUSE_ACTS: [(&str, &str); 31] = [
     ("Как обычно", "default"),
     ("Ничего", "none"),
     ("G-Shift — зажать для второго слоя", "gshift"),
@@ -94,6 +94,10 @@ const MOUSE_ACTS: [(&str, &str); 27] = [
     ("Громче", "key volumeup"),
     ("Тише", "key volumedown"),
     ("Без звука", "key mute"),
+    ("Автокликер левой: 15 в секунду, пока держишь", "click left 15"),
+    ("Автокликер левой: 30 в секунду, пока держишь", "click left 30"),
+    ("Автокликер левой: 15 в секунду, нажал — включён, ещё раз — выключен", "click left 15 toggle"),
+    ("Автокликер правой: 15 в секунду, пока держишь", "click right 15"),
 ];
 
 /// Wallpaper tiles: size of a thumbnail.
@@ -101,6 +105,8 @@ const TW: usize = 320;
 const TH: usize = 180;
 const TILE_GAP: i32 = 12;
 const TILE_LABEL: i32 = 24;
+/// «Своё действие»'s field.
+const EDIT_H: i32 = 38;
 const DEV_ROW: i32 = 38;
 /// «Удалить» at the right end of a paired Bluetooth device's row.
 const BT_FORGET_W: i32 = 84;
@@ -219,6 +225,8 @@ enum Ctl {
     Plane,
     /// Bluetooth devices: paired (false) or found nearby (true).
     Bt(bool),
+    /// «Мышь»: the chosen button's action as text (a macro, an autoclicker of one's own).
+    Edit,
 }
 
 // ------------------------------------------------------------------ the compositor's state
@@ -482,6 +490,10 @@ struct App {
     /// «Мышь»: the button and the layer the action list sets.
     mbtn: usize,
     mlayer: usize,
+    /// «Своё действие»: the field, whether it is being typed in, and what was wrong.
+    medit: crate::textedit::TextField,
+    medit_on: bool,
+    medit_err: Option<String>,
     /// The update: its state, and the thread's answer to come.
     upd: Upd,
     upd_rx: Option<std::sync::mpsc::Receiver<Upd>>,
@@ -780,6 +792,45 @@ impl App {
                 MOUSE_ACTS.iter().position(|(_, s)| *s == cur).unwrap_or(MOUSE_ACTS.len())
             }
         }
+    }
+
+    /// «Своё действие»: Enter applies the text to the chosen button and layer.
+    fn medit_apply(&mut self) {
+        let text = self.medit.text().trim().to_string();
+        let act = crate::mousebind::Act::parse(&text);
+        if act == crate::mousebind::Act::Default && !text.is_empty() && text != "default" {
+            self.medit_err = Some(text);
+            return;
+        }
+        let Some(b) = crate::mousebind::BUTTONS.get(self.mbtn) else { return };
+        send(&format!("mouse-bind {} {} {}", b.0, self.mlayer, act.spec()));
+        self.medit_on = false;
+        self.medit_err = None;
+        self.refresh();
+    }
+
+    /// A key while typing in «Своё действие». True: taken.
+    fn medit_key(&mut self, k: u32, mods: crate::textedit::Mods, win: &mut crate::client::Window) -> bool {
+        if !self.medit_on {
+            return false;
+        }
+        match k {
+            28 | 96 => self.medit_apply(),
+            1 => {
+                self.medit_on = false;
+                self.medit_err = None;
+            }
+            _ => match self.medit.key(k, mods) {
+                crate::textedit::Act::Paste => {
+                    if let Some(t) = win.clipboard() {
+                        self.medit.insert(t.lines().next().unwrap_or(""));
+                    }
+                }
+                crate::textedit::Act::Copy(t) | crate::textedit::Act::Cut(t) => win.set_clipboard(&t),
+                _ => {}
+            },
+        }
+        true
     }
 
     /// What mouse button `b` does in `layer` («default» when nothing is set).
@@ -1343,6 +1394,11 @@ impl App {
                 v.push(("Кнопка".into(), String::new(), String::new(), Ctl::Choice(Ch::MBtn)));
                 v.push(("Когда".into(), String::new(), String::new(), Ctl::Choice(Ch::MLayer)));
                 v.push(("Что делает".into(), String::new(), String::new(), Ctl::Choice(Ch::MAct)));
+                let desc = match &self.medit_err {
+                    Some(e) => format!("Не понял: {e}. Enter — применить, Esc — отмена"),
+                    None => "Впишите и нажмите Enter. Сочетание: key ctrl+shift+t · команда: cmd firefox · автокликер: click left 20 (пока держишь) или click left 20 toggle (вкл/выкл) · макрос: macro ctrl+c, 50, ctrl+v (числа — паузы в мс, click left — клик) · macro-loop … — повторять, пока держишь".into(),
+                };
+                v.push(("Своё действие".into(), String::new(), desc, Ctl::Edit));
             }
             Page::About => {
                 v.push((
@@ -1418,6 +1474,7 @@ impl App {
                 Ctl::Bt(others) => h += (self.bt_devs(others).len() as i32 * DEV_ROW - 6).max(0),
                 Ctl::Choice(ch) => h += self.opts(ch).len() as i32 * DEV_ROW - 6,
                 Ctl::Plane => h += PLANE_H,
+                Ctl::Edit => h += EDIT_H,
                 _ => {}
             }
             let card = Rect::new(cx, y, cw, h);
@@ -1425,7 +1482,7 @@ impl App {
                 Ctl::Switch(_) => Rect::new(card.x1() - CARD_PAD - SWITCH_W as i32, card.y + (card.h - SWITCH_H as i32) / 2, SWITCH_W as i32, SWITCH_H as i32),
                 Ctl::Slider(_) => Rect::new(card.x + CARD_PAD, card.y1() - CARD_PAD - SLIDER_H + 4, card.w - 2 * CARD_PAD, SLIDER_H),
                 Ctl::Button(..) => Rect::new(card.x1() - CARD_PAD - BTN_W, card.y + (card.h - BTN_H) / 2, BTN_W, BTN_H),
-                Ctl::Walls | Ctl::Devices(_) | Ctl::Choice(_) | Ctl::Plane | Ctl::Bt(_) => Rect::from_edges(card.x + CARD_PAD, card.y + body_y + 6, card.x1() - CARD_PAD, card.y1() - CARD_PAD),
+                Ctl::Walls | Ctl::Devices(_) | Ctl::Choice(_) | Ctl::Plane | Ctl::Bt(_) | Ctl::Edit => Rect::from_edges(card.x + CARD_PAD, card.y + body_y + 6, card.x1() - CARD_PAD, card.y1() - CARD_PAD),
                 Ctl::None => Rect::default(),
             };
             rows.push(Row { name, value, desc, ctl, card, at });
@@ -1504,6 +1561,18 @@ impl App {
 
     fn press(&mut self, x: f64, y: f64) {
         let l = self.layout();
+        // «Своё действие»: a click in it starts typing (the action as it is, all selected), a
+        // click elsewhere ends it.
+        let on_edit = l.rows.iter().any(|r| r.ctl == Ctl::Edit && r.at.contains(x, y));
+        if on_edit && !self.medit_on {
+            self.medit.set(&self.mbind(self.mbtn, self.mlayer));
+            let n = self.medit.len();
+            self.medit.select(0, n);
+            self.medit_on = true;
+            self.medit_err = None;
+        } else if !on_edit {
+            self.medit_on = false;
+        }
         if let Some(i) = l.nav.iter().position(|r| r.contains(x, y)) {
             self.set_page(PAGES[i].0);
             return;
@@ -1820,6 +1889,9 @@ pub fn run(args: &[String]) -> i32 {
         place: 0,
         mbtn: 0,
         mlayer: 0,
+        medit: Default::default(),
+        medit_on: false,
+        medit_err: None,
         mon: String::new(),
         pdrag: None,
         upd: Upd::Idle,
@@ -1894,6 +1966,7 @@ pub fn run(args: &[String]) -> i32 {
                 Ev::Button(0x110, false) => app.release(),
                 Ev::Button(..) => {}
                 Ev::Wheel(v) => app.wheel(v),
+                Ev::Key(k, true) if app.medit_key(k, win.mods(), &mut win) => {}
                 Ev::Key(k, true) => {
                     let i = PAGES.iter().position(|p| p.0 == app.page).unwrap_or(0);
                     match k {
@@ -2372,6 +2445,21 @@ fn draw_page(app: &App, cv: &mut Canvas, l: &Layout) {
             }
             Ctl::Slider(sl) => slider(cv, vclip, xf, row.at, app.anims.get(AK::Slider(sl))),
             Ctl::Button(_, label) => button(cv, vclip, xf, row.at, label, app.anims.get(AK::Btn)),
+            Ctl::Edit => {
+                let r = Rect::new(row.at.x, row.at.y, row.at.w, EDIT_H - 6);
+                let p = xf.r(r);
+                let s = xf.scale as f32;
+                let border = if app.medit_on { { let [r, g, b] = accent_rgb(); Some((s * 1.5, rgba(r, g, b, 0.9))) } } else { Some((s, white(0.12))) };
+                let look = Look { fill: white(if app.medit_on { 0.10 } else { 0.06 }), shadow: None, highlight: 0.0, border };
+                draw_box(cv, vclip, FBox { x: p.x as f32, y: p.y as f32, w: p.w as f32, h: p.h as f32, r: 10.0 * s }, &look, s);
+                let base = r.y + r.h / 2 + 5;
+                if app.medit_on {
+                    app.medit.draw(cv, vclip, xf, r.x + 12, base, r.w - 24, 13.5, text_color(1.0), font::W::Text);
+                } else {
+                    let cur = app.mbind(app.mbtn, app.mlayer);
+                    font::draw_text(cv, vclip, xf, r.x + 12, base, &cur, 13.5, text_color(0.7), r.w - 24);
+                }
+            }
             Ctl::None => {}
         }
     }

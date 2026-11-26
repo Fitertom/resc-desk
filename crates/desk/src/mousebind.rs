@@ -1,12 +1,15 @@
 //! The mouse's buttons bound to other things («Параметры» → «Мышь», as Logitech's G Hub
 //! does without it): each button has an action as it is and one while a G-Shift button is
 //! held (a second layer). Actions: a key combination (held as long as the button is), a
-//! command, nothing, G-Shift itself, or the button as it was.
+//! command, nothing, G-Shift itself, the button as it was, an autoclicker (clicks of a
+//! mouse button so many times a second, while held or switched on and off by a press), or a
+//! macro (keys, clicks and pauses in a row: once, or over and over while held).
 //!
 //! The side buttons, the wheel's click and tilt, and the wheel itself (only with G-Shift)
 //! are bound here (evdev.rs asks before passing them on). Bindings live in
 //! ~/.config/resc-desk/mouse.conf: `bind NAME LAYER ACTION` (LAYER 0: as is, 1: with
-//! G-Shift; ACTION: default, none, gshift, `key ctrl+c`, `cmd COMMAND`).
+//! G-Shift; ACTION: default, none, gshift, `key ctrl+c`, `cmd COMMAND`, `click left 15`,
+//! `click left 15 toggle`, `macro ctrl+c, 50, ctrl+v`, `macro-loop click left, 100`).
 use crate::desk::Desk;
 use std::collections::HashMap;
 
@@ -34,6 +37,57 @@ pub enum Act {
     GShift,
     Keys(Vec<u32>),
     Cmd(String),
+    /// Autoclicker: `btn` (evdev) `cps` times a second; while held, or on/off by a press.
+    Click { btn: u16, cps: u32, toggle: bool },
+    /// Steps in a row; `repeat`: over and over while held.
+    Macro { steps: Vec<Step>, repeat: bool },
+}
+
+/// A macro's step.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Step {
+    /// A key combination pressed and let go.
+    Tap(Vec<u32>),
+    /// A click of a mouse button (evdev).
+    Click(u16),
+    /// A pause, ms.
+    Wait(u32),
+}
+
+const MOUSE_BTNS: [(&str, u16); 5] = [("left", 0x110), ("right", 0x111), ("middle", 0x112), ("side", 0x113), ("extra", 0x114)];
+
+fn btn_code(n: &str) -> Option<u16> {
+    MOUSE_BTNS.iter().find(|(k, _)| *k == n.trim()).map(|(_, c)| *c)
+}
+
+fn btn_name(c: u16) -> &'static str {
+    MOUSE_BTNS.iter().find(|(_, k)| *k == c).map_or("left", |(n, _)| n)
+}
+
+fn steps(s: &str) -> Option<Vec<Step>> {
+    let mut v = Vec::new();
+    for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let num = part.strip_suffix("ms").unwrap_or(part).trim();
+        if let Ok(ms) = num.parse::<u32>() {
+            v.push(Step::Wait(ms.min(60_000)));
+        } else if let Some(b) = part.strip_prefix("click") {
+            v.push(Step::Click(btn_code(if b.trim().is_empty() { "left" } else { b })?));
+        } else {
+            v.push(Step::Tap(keys(part)?));
+        }
+    }
+    (!v.is_empty()).then_some(v)
+}
+
+fn steps_spec(v: &[Step]) -> String {
+    v.iter()
+        .map(|st| match st {
+            Step::Tap(k) => k.iter().map(|c| key_name(*c)).collect::<Vec<_>>().join("+"),
+            Step::Click(b) => format!("click {}", btn_name(*b)),
+            Step::Wait(ms) => ms.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl Act {
@@ -44,6 +98,14 @@ impl Act {
             ("gshift", _) => Act::GShift,
             ("key", k) => keys(k).map_or(Act::Default, Act::Keys),
             ("cmd", c) if !c.is_empty() => Act::Cmd(c.to_string()),
+            ("click", rest) => {
+                let w: Vec<&str> = rest.split_whitespace().collect();
+                let btn = w.first().and_then(|b| btn_code(b)).unwrap_or(0x110);
+                let cps = w.get(1).and_then(|n| n.parse::<u32>().ok()).unwrap_or(10).clamp(1, 100);
+                Act::Click { btn, cps, toggle: w.contains(&"toggle") }
+            }
+            ("macro", st) => steps(st).map_or(Act::Default, |steps| Act::Macro { steps, repeat: false }),
+            ("macro-loop", st) => steps(st).map_or(Act::Default, |steps| Act::Macro { steps, repeat: true }),
             _ => Act::Default,
         }
     }
@@ -55,6 +117,8 @@ impl Act {
             Act::GShift => "gshift".into(),
             Act::Keys(k) => format!("key {}", k.iter().map(|c| key_name(*c)).collect::<Vec<_>>().join("+")),
             Act::Cmd(c) => format!("cmd {c}"),
+            Act::Click { btn, cps, toggle } => format!("click {} {cps}{}", btn_name(*btn), if *toggle { " toggle" } else { "" }),
+            Act::Macro { steps, repeat } => format!("{} {}", if *repeat { "macro-loop" } else { "macro" }, steps_spec(steps)),
         }
     }
 }
@@ -132,6 +196,137 @@ pub struct Binds {
     gshift: u32,
     /// What each button held now does (its release does the same, layer or not).
     held: HashMap<u16, Act>,
+    /// Autoclickers and macros running.
+    jobs: Vec<Job>,
+}
+
+/// One low-level event of a running autoclicker or macro.
+#[derive(Clone, Copy, Debug)]
+enum Ev {
+    Key(u32, bool),
+    Btn(u16, bool),
+    Wait(u32),
+}
+
+struct Job {
+    /// The button that started it (a tilt or the wheel: 0).
+    owner: u16,
+    evs: Vec<Ev>,
+    at: usize,
+    /// Over and over (an autoclicker, a looping macro) until stopped.
+    repeat: bool,
+    /// When the next event is due (ms, Desk::now_ms).
+    next: u32,
+    /// Keys and buttons it holds down now (let go when it stops).
+    down: Vec<Ev>,
+}
+
+/// How long a key or a button of a macro is held, and the pause after it (ms): games read
+/// what is down at their frame, a press and release in the same instant may not count.
+const HOLD_MS: u32 = 12;
+
+fn expand(steps: &[Step]) -> Vec<Ev> {
+    let mut v = Vec::new();
+    for st in steps {
+        match st {
+            Step::Tap(k) => {
+                v.extend(k.iter().map(|c| Ev::Key(*c, true)));
+                v.push(Ev::Wait(HOLD_MS));
+                v.extend(k.iter().rev().map(|c| Ev::Key(*c, false)));
+                v.push(Ev::Wait(HOLD_MS));
+            }
+            Step::Click(b) => v.extend([Ev::Btn(*b, true), Ev::Wait(HOLD_MS), Ev::Btn(*b, false), Ev::Wait(HOLD_MS)]),
+            Step::Wait(ms) => v.push(Ev::Wait(*ms)),
+        }
+    }
+    v
+}
+
+fn start(d: &mut Desk, owner: u16, evs: Vec<Ev>, repeat: bool) {
+    let next = d.now_ms();
+    d.mouse.jobs.push(Job { owner, evs, at: 0, repeat, next, down: Vec::new() });
+    tick(d);
+}
+
+/// Stops the jobs of `owner`, letting go of what they hold.
+fn stop(d: &mut Desk, owner: u16) {
+    let t = d.now_ms();
+    let mut i = 0;
+    while i < d.mouse.jobs.len() {
+        if d.mouse.jobs[i].owner != owner {
+            i += 1;
+            continue;
+        }
+        let j = d.mouse.jobs.remove(i);
+        for e in j.down.into_iter().rev() {
+            emit(d, match e {
+                Ev::Key(c, _) => Ev::Key(c, false),
+                Ev::Btn(b, _) => Ev::Btn(b, false),
+                w => w,
+            }, t);
+        }
+    }
+}
+
+fn emit(d: &mut Desk, e: Ev, t: u32) {
+    match e {
+        Ev::Key(c, p) => crate::input::key(d, c, p, t),
+        Ev::Btn(b, p) => crate::input::pointer_button(d, b as u32, p, t),
+        Ev::Wait(_) => {}
+    }
+}
+
+/// Runs what is due of the autoclickers and macros (the main loop, every turn).
+pub fn tick(d: &mut Desk) {
+    if d.mouse.jobs.is_empty() {
+        return;
+    }
+    let now = d.now_ms();
+    let mut i = 0;
+    while i < d.mouse.jobs.len() {
+        // At most a few hundred events a turn (a looping macro of no pauses).
+        for _ in 0..256 {
+            let j = &mut d.mouse.jobs[i];
+            if j.next > now {
+                break;
+            }
+            if j.at >= j.evs.len() {
+                if !j.repeat {
+                    break;
+                }
+                j.at = 0;
+            }
+            let e = j.evs[j.at];
+            j.at += 1;
+            match e {
+                Ev::Wait(ms) => j.next = j.next.max(now.saturating_sub(50)) + ms,
+                Ev::Key(_, p) | Ev::Btn(_, p) => {
+                    let key = |x: &Ev| match (x, &e) {
+                        (Ev::Key(a, _), Ev::Key(b, _)) => a == b,
+                        (Ev::Btn(a, _), Ev::Btn(b, _)) => a == b,
+                        _ => false,
+                    };
+                    j.down.retain(|x| !key(x));
+                    if p {
+                        j.down.push(e);
+                    }
+                    emit(d, e, now);
+                }
+            }
+        }
+        let j = &d.mouse.jobs[i];
+        if !j.repeat && j.at >= j.evs.len() {
+            d.mouse.jobs.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// How long the main loop may sleep for the autoclickers and macros (ms; None: no limit).
+pub fn wait_ms(d: &Desk) -> Option<i32> {
+    let now = d.now_ms();
+    d.mouse.jobs.iter().map(|j| j.next.saturating_sub(now) as i32).min()
 }
 
 fn path() -> std::path::PathBuf {
@@ -159,7 +354,7 @@ pub fn load() -> Binds {
 fn save(b: &Binds) {
     let mut v: Vec<_> = b.map.iter().collect();
     v.sort_by(|a, b| a.0.cmp(b.0));
-    let mut s = String::from("# resc-desk mouse buttons: bind NAME LAYER(0 as is, 1 with G-Shift) ACTION (default, none, gshift, key ctrl+c, cmd COMMAND)\n");
+    let mut s = String::from("# resc-desk mouse buttons: bind NAME LAYER(0 as is, 1 with G-Shift) ACTION (default, none, gshift, key ctrl+c, cmd COMMAND, click left 15 [toggle], macro ctrl+c, 50, ctrl+v, macro-loop click left, 100)\n");
     for ((n, l), a) in v {
         s.push_str(&format!("bind {n} {l} {}\n", a.spec()));
     }
@@ -205,7 +400,7 @@ fn lookup(d: &Desk, name: &str) -> Act {
     get(0).unwrap_or(Act::Default)
 }
 
-fn run(d: &mut Desk, act: &Act, pressed: bool, t: u32) {
+fn run(d: &mut Desk, owner: u16, act: &Act, pressed: bool, t: u32) {
     match act {
         Act::Keys(k) => {
             if pressed {
@@ -219,6 +414,21 @@ fn run(d: &mut Desk, act: &Act, pressed: bool, t: u32) {
             }
         }
         Act::Cmd(c) if pressed => d.spawn(c),
+        Act::Click { btn, cps, toggle } => {
+            let running = d.mouse.jobs.iter().any(|j| j.owner == owner);
+            let half = (1000 / *cps / 2).max(1);
+            let evs = vec![Ev::Btn(*btn, true), Ev::Wait(half.min(HOLD_MS)), Ev::Btn(*btn, false), Ev::Wait((1000 / *cps).saturating_sub(half.min(HOLD_MS)).max(1))];
+            match (*toggle, pressed, running) {
+                (true, true, true) | (false, false, _) => stop(d, owner),
+                (_, true, false) => start(d, owner, evs, true),
+                _ => {}
+            }
+        }
+        Act::Macro { steps, repeat } => match (pressed, *repeat) {
+            (true, _) if !d.mouse.jobs.iter().any(|j| j.owner == owner) => start(d, owner, expand(steps), *repeat),
+            (false, true) => stop(d, owner),
+            _ => {}
+        },
         Act::GShift => {
             if pressed {
                 d.mouse.gshift += 1;
@@ -239,13 +449,13 @@ pub fn button(d: &mut Desk, code: u16, pressed: bool, t: u32) -> bool {
         if act == Act::Default {
             return false;
         }
-        run(d, &act, true, t);
+        run(d, code, &act, true, t);
         true
     } else {
         match d.mouse.held.remove(&code) {
             None | Some(Act::Default) => false,
             Some(act) => {
-                run(d, &act, false, t);
+                run(d, code, &act, false, t);
                 true
             }
         }
@@ -270,8 +480,20 @@ pub fn tap(d: &mut Desk, name: &str, t: u32) -> bool {
     if act == Act::Default || act == Act::GShift {
         return false;
     }
-    run(d, &act, true, t);
-    run(d, &act, false, t);
+    // (A tilt has no release of its own: a looping macro or a held autoclicker runs one
+    // round; a toggled one switches.)
+    let owner = if name == "tilt_left" { 1 } else if name == "tilt_right" { 2 } else { 3 };
+    match &act {
+        Act::Click { toggle: false, btn, .. } => {
+            let b = *btn;
+            start(d, owner, vec![Ev::Btn(b, true), Ev::Wait(HOLD_MS), Ev::Btn(b, false)], false);
+        }
+        Act::Macro { steps, repeat: true } => start(d, owner, expand(steps), false),
+        _ => {
+            run(d, owner, &act, true, t);
+            run(d, owner, &act, false, t);
+        }
+    }
     true
 }
 
@@ -286,5 +508,10 @@ mod tests {
         assert_eq!(Act::parse("key ctrl+c"), Act::Keys(vec![29, 46]));
         assert_eq!(Act::parse("key nonsense+c"), Act::Default);
         assert_eq!(Act::parse("key 1+0"), Act::Keys(vec![2, 11]));
+        for s in ["click left 15", "click right 30 toggle", "macro ctrl+c, 50, ctrl+v", "macro-loop click left, 100, e"] {
+            assert_eq!(Act::parse(s).spec(), s);
+        }
+        assert_eq!(Act::parse("macro ctrl+c, 50ms, click"), Act::Macro { steps: vec![Step::Tap(vec![29, 46]), Step::Wait(50), Step::Click(0x110)], repeat: false });
+        assert_eq!(Act::parse("macro nonsense"), Act::Default);
     }
 }
