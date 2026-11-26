@@ -617,6 +617,8 @@ pub fn restore(d: &mut Desk, wk: WKey) {
     }
     let r = d.windows[wk].restore;
     d.windows[wk].tile = Tile::Floating;
+    // Out of fullscreen: no longer over its monitor (the taskbar comes back there).
+    d.windows[wk].fullscreen_output = None;
     if r.is_empty() {
         send_configure(d, wk, 0, 0);
     } else {

@@ -352,7 +352,7 @@ pub fn output_covered(d: &Desk, oi: usize) -> bool {
         // The topmost window on this monitor decides.
         // (Floating only: a maximized window that draws its own frame covers it too, and the
         // taskbar must still come out over it.)
-        return w.fullscreen_output == Some(oi) || (!w.ssd && w.tile == crate::state::Tile::Floating && r.contains_rect(&or));
+        return (w.tile == crate::state::Tile::Fullscreen && w.fullscreen_output == Some(oi)) || (!w.ssd && w.tile == crate::state::Tile::Floating && r.contains_rect(&or));
     }
     false
 }
