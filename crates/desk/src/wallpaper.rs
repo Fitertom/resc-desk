@@ -6,6 +6,9 @@
 //!   picture runs straight across the joint;
 //! - in "glue" mode the gaps are closed and nothing is lost.
 //!
+//! A monitor may have a picture of its own instead (cover fit over that monitor alone):
+//! three monitors side by side need not share one long strip.
+//!
 //! Every output keeps a pre-rendered copy at its own pixel size; repainting a
 //! damaged rect is then just a row copy.
 use crate::desk::Desk;
@@ -27,6 +30,9 @@ pub struct Wall {
     /// A picture being decoded on a thread (a 5K JPEG takes seconds on a slow CPU): its
     /// path and where the result lands.
     loading: Option<(String, Loading)>,
+    /// Monitors' own pictures, by output name, and the ones being decoded.
+    pub per: std::collections::HashMap<String, Image>,
+    per_loading: Vec<(String, String, Loading)>,
     cache: RefCell<Vec<(u32, i32, i32, Vec<u32>)>>,
     /// Bumped on every change: the GPU re-uploads its wallpaper textures.
     pub gen: std::cell::Cell<u64>,
@@ -40,7 +46,7 @@ impl Wall {
 
     /// A picture is being decoded (`set`) and not shown yet.
     pub fn is_loading(&self) -> bool {
-        self.loading.is_some()
+        self.loading.is_some() || !self.per_loading.is_empty()
     }
 
     /// Loads a JPEG or PNG; `None` means the built-in wallpaper.
@@ -67,24 +73,62 @@ pub fn set(d: &mut Desk, path: Option<String>) {
             let _ = crate::layout::save_config(d);
         }
         Some(p) => {
-            let slot: Loading = Default::default();
-            let out = slot.clone();
-            let file = p.clone();
-            std::thread::spawn(move || {
-                let r = decode_file(&file);
-                if let Ok(mut g) = out.lock() {
-                    *g = Some(r);
-                }
-            });
+            let slot = decode_on_thread(&p);
             d.wall.loading = Some((p, slot));
         }
     }
 }
 
+fn decode_on_thread(p: &str) -> Loading {
+    let slot: Loading = Default::default();
+    let out = slot.clone();
+    let file = p.to_string();
+    std::thread::spawn(move || {
+        let r = decode_file(&file);
+        if let Ok(mut g) = out.lock() {
+            *g = Some(r);
+        }
+    });
+    slot
+}
+
+/// Monitor `output`'s own picture (None: as all the others again).
+pub fn set_for(d: &mut Desk, output: &str, path: Option<String>) {
+    d.wall.per_loading.retain(|(o, _, _)| o != output);
+    match path {
+        None => {
+            d.display_cfg.wallpapers.remove(output);
+            if d.wall.per.remove(output).is_some() {
+                d.wall.invalidate();
+                d.damage_all();
+                update_accent(d);
+            }
+            let _ = crate::layout::save_config(d);
+        }
+        Some(p) => {
+            let slot = decode_on_thread(&p);
+            d.wall.per_loading.push((output.to_string(), p, slot));
+        }
+    }
+}
+
+/// The picture of every monitor (all of them: their own ones go).
+pub fn set_all(d: &mut Desk, path: Option<String>) {
+    d.wall.per_loading.clear();
+    d.display_cfg.wallpapers.clear();
+    if !d.wall.per.is_empty() {
+        d.wall.per.clear();
+        d.wall.invalidate();
+    }
+    set(d, path);
+}
+
 /// The ambient color from the wallpaper now (look.rs): everything wearing it redrawn, the
 /// apps told.
 pub fn update_accent(d: &mut Desk) {
-    let a = match &d.wall.img {
+    // The main monitor's picture.
+    let main = d.outputs.get(crate::monitors::primary_index(d)).and_then(|o| d.wall.per.get(&o.name));
+    let a = match main.or(d.wall.img.as_ref()) {
         Some(img) => crate::look::accent_of(&img.px, img.w, img.h),
         None => crate::look::accent_of(&builtin(160, 90), 160, 90),
     };
@@ -97,6 +141,26 @@ pub fn update_accent(d: &mut Desk) {
 
 /// A picture finished decoding: show it, remember it.
 pub fn poll(d: &mut Desk) {
+    // Monitors' own pictures.
+    let mut i = 0;
+    while i < d.wall.per_loading.len() {
+        let Some(res) = d.wall.per_loading[i].2.lock().ok().and_then(|mut g| g.take()) else {
+            i += 1;
+            continue;
+        };
+        let (out, path, _) = d.wall.per_loading.remove(i);
+        match res {
+            Ok(img) => {
+                d.wall.per.insert(out.clone(), img);
+                d.wall.invalidate();
+                d.display_cfg.wallpapers.insert(out, path);
+                d.damage_all();
+                update_accent(d);
+                let _ = crate::layout::save_config(d);
+            }
+            Err(e) => eprintln!("wallpaper: {e}"),
+        }
+    }
     let Some((path, slot)) = &d.wall.loading else { return };
     let Some(res) = slot.lock().ok().and_then(|mut g| g.take()) else { return };
     let path = path.clone();
@@ -280,13 +344,17 @@ pub fn draw_scaled(d: &Desk, oi: usize, cv: &mut Canvas, clip: Rect, dst: Rect) 
 
 fn render_output(d: &Desk, oi: usize) -> Vec<u32> {
     let o = &d.outputs[oi];
-    let b = plane_box(d);
+    // Its own picture over it alone, or the common one over all of them.
+    let (img, b) = match d.wall.per.get(&o.name) {
+        Some(i) => (Some(i), o.rect()),
+        None => (d.wall.img.as_ref(), plane_box(d)),
+    };
     let (pw, ph) = (o.pw as usize, o.ph as usize);
     let mut out = vec![0u32; pw * ph];
     // Physical pixel centre → global logical coordinate.
     let lx = |x: usize| o.x as f64 + (x as f64 + 0.5) / o.scale;
     let ly = |y: usize| o.y as f64 + (y as f64 + 0.5) / o.scale;
-    match &d.wall.img {
+    match img {
         Some(img) => {
             let s = (b.w as f64 / img.w as f64).max(b.h as f64 / img.h as f64);
             let offx = (b.w as f64 - img.w as f64 * s) / 2.0;

@@ -558,6 +558,9 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
 ", d.display_cfg.ui_scale));
             out.push_str(&format!("wallpaper {}
 ", d.display_cfg.wallpaper.as_deref().unwrap_or("default")));
+            for (o, w) in &d.display_cfg.wallpapers {
+                out.push_str(&format!("wallpaper_on {o} {w}\n"));
+            }
             out.push_str(&format!("glue {}
 ", d.display_cfg.glue as u8));
             out.push_str(&format!("renderer {}
@@ -583,8 +586,28 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             if let Some(f) = &p {
                 std::fs::metadata(f).map_err(|e| format!("{f}: {e}"))?;
             }
-            // Decoded on a thread; shown (and saved) when ready.
-            crate::wallpaper::set(d, p);
+            // Decoded on a thread; shown (and saved) when ready. Every monitor's: their own
+            // pictures go.
+            crate::wallpaper::set_all(d, p);
+        }
+        // wallpaper-on OUTPUT PATH|all: a monitor's own picture, or the common one again.
+        "wallpaper-on" => {
+            let usage = "wallpaper-on OUTPUT PATH|all";
+            let o = arg(0)?.to_string();
+            if !d.outputs.iter().any(|x| x.name == o) && !d.display_cfg.wallpapers.contains_key(&o) {
+                return Err(format!("{o}: no such monitor"));
+            }
+            let p = rest[1..].join(" ");
+            if p.is_empty() {
+                return Err(usage.into());
+            }
+            if p == "all" {
+                crate::wallpaper::set_for(d, &o, None);
+            } else {
+                std::fs::metadata(&p).map_err(|e| format!("{p}: {e}"))?;
+                crate::wallpaper::set_for(d, &o, Some(p));
+            }
+            out.push_str("ok\n");
         }
         "import-lbm" => {
             let xml = std::fs::read_to_string(arg(0)?).map_err(|e| e.to_string())?;

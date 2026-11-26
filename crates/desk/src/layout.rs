@@ -25,6 +25,8 @@ pub struct DisplayConfig {
     /// a bezel); heights and physical scale stay as calibrated.
     pub glue: bool,
     pub wallpaper: Option<String>,
+    /// Monitors' own pictures: output name → path (wallpaper.rs).
+    pub wallpapers: std::collections::BTreeMap<String, String>,
     /// Live wallpaper «Частицы» (livewall.rs), its trails fading toward the picture.
     pub wallpaper_live: bool,
     pub wallpaper_live_picture: bool,
@@ -69,6 +71,7 @@ pub fn load_config() -> DisplayConfig {
         planes: HashMap::new(),
         glue: false,
         wallpaper: None,
+        wallpapers: Default::default(),
         wallpaper_live: false,
         wallpaper_live_picture: false,
         glass_frosted: true,
@@ -86,6 +89,10 @@ pub fn load_config() -> DisplayConfig {
     };
     let Ok(text) = std::fs::read_to_string(config_path()) else { return c };
     for line in text.lines() {
+        if let Some((o, p)) = line.strip_prefix("wallpaper_on ").and_then(|r| r.split_once(' ')) {
+            c.wallpapers.insert(o.to_string(), p.trim().to_string());
+            continue;
+        }
         if let Some(p) = line.strip_prefix("wallpaper ") {
             c.wallpaper = Some(p.trim().to_string());
             continue;
@@ -140,6 +147,9 @@ pub fn save_config(d: &Desk) -> std::io::Result<String> {
     s.push_str(&format!("glue {}\n", if d.display_cfg.glue { "on" } else { "off" }));
     if let Some(w) = &d.display_cfg.wallpaper {
         s.push_str(&format!("wallpaper {w}\n"));
+    }
+    for (o, w) in &d.display_cfg.wallpapers {
+        s.push_str(&format!("wallpaper_on {o} {w}\n"));
     }
     if d.display_cfg.wallpaper_live {
         s.push_str(&format!("wallpaper_live {}\n", if d.display_cfg.wallpaper_live_picture { "picture" } else { "particles" }));

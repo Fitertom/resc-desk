@@ -268,6 +268,9 @@ fn main() {
     glass::set_bezel(d.display_cfg.glass_bezel, d.display_cfg.glass_win_bezel);
     // The built-in wallpaper until the picture is decoded (on a thread).
     wallpaper::update_accent(&mut d);
+    for (o, p) in d.display_cfg.wallpapers.clone() {
+        wallpaper::set_for(&mut d, &o, Some(p));
+    }
     if let Some(p) = d.display_cfg.wallpaper.clone() {
         wallpaper::set(&mut d, Some(p));
     }

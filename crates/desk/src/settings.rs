@@ -162,9 +162,11 @@ enum Ch {
     MBtn,
     MLayer,
     MAct,
+    /// «Обои»: all the monitors, or which one gets a picture of its own.
+    WallMon,
 }
 
-const ALL_CH: [Ch; 11] = [Ch::Launch, Ch::Close, Ch::Place, Ch::Project, Ch::Mon, Ch::Res, Ch::Hz, Ch::Rot, Ch::MBtn, Ch::MLayer, Ch::MAct];
+const ALL_CH: [Ch; 12] = [Ch::Launch, Ch::Close, Ch::Place, Ch::Project, Ch::Mon, Ch::Res, Ch::Hz, Ch::Rot, Ch::MBtn, Ch::MLayer, Ch::MAct, Ch::WallMon];
 
 const ROTATIONS: [&str; 4] = ["Без поворота", "90° — портрет", "180° — вверх ногами", "270° — портрет, наоборот"];
 
@@ -185,6 +187,8 @@ fn hz_name(mhz: i32) -> String {
 #[derive(Clone, Copy, PartialEq)]
 enum Btn {
     Calibrate,
+    /// «Обои»: the chosen monitor back to the picture of all the others.
+    WallAll,
     /// «О системе»: check for, install, or start the new version (update.rs).
     Update,
 }
@@ -261,6 +265,8 @@ struct Model {
     anim_close: usize,
     /// The current wallpaper (None: the built-in one).
     wallpaper: Option<String>,
+    /// Monitors' own pictures: output name, path.
+    wallpapers: Vec<(String, String)>,
     /// Each glass place: its key (look.rs PLACES, then `app:ID` of programs with glass of
     /// their own), its name, its dim, blur and edge.
     places: Vec<(String, String, [f32; 3])>,
@@ -322,6 +328,11 @@ fn fetch() -> Model {
             "anim" => {
                 m.anim_launch = f(0) as usize;
                 m.anim_close = f(1) as usize;
+            }
+            "wallpaper_on" => {
+                if let Some((o, p)) = v.split_once(' ') {
+                    m.wallpapers.push((o.to_string(), p.to_string()));
+                }
             }
             "wallpaper" => m.wallpaper = (v != "default" && !v.is_empty()).then(|| v.to_string()),
             "glue" => m.glue = f(0) != 0.0,
@@ -463,7 +474,9 @@ struct App {
     /// The chosen output (0) and input (1) device, flowing between rows.
     devs: [Option<Drop>; 2],
     /// The chosen option of each `Ch`, flowing between rows.
-    chs: [Option<Drop>; 11],
+    chs: [Option<Drop>; 12],
+    /// «Обои»: 0 all the monitors, else the monitor (`m.mons[i - 1]`) whose own picture the tiles set.
+    wall_mon: usize,
     /// The glass place the «Стекло» page sets.
     place: usize,
     /// «Мышь»: the button and the layer the action list sets.
@@ -761,6 +774,7 @@ impl App {
             Ch::Rot => mon.map_or(0, |m| (m.rot / 90) as usize),
             Ch::MBtn => self.mbtn,
             Ch::MLayer => self.mlayer,
+            Ch::WallMon => self.wall_mon.min(self.m.mons.len()),
             Ch::MAct => {
                 let cur = self.mbind(self.mbtn, self.mlayer);
                 MOUSE_ACTS.iter().position(|(_, s)| *s == cur).unwrap_or(MOUSE_ACTS.len())
@@ -805,6 +819,12 @@ impl App {
             Ch::Res => self.sizes().iter().map(|(w, h)| format!("{w} × {h}")).collect(),
             Ch::Hz => self.rates().into_iter().map(hz_name).collect(),
             Ch::Rot => st(&ROTATIONS),
+            Ch::WallMon => std::iter::once("Все мониторы — одна картинка на все сразу".to_string())
+                .chain(self.m.mons.iter().enumerate().map(|(i, m)| {
+                    let own = if self.m.wallpapers.iter().any(|(o, _)| *o == m.name) { "  ·  своя картинка" } else { "" };
+                    format!("{}  {}  ·  {}×{}{own}", i + 1, m.name, m.w, m.h)
+                }))
+                .collect(),
             Ch::MBtn => crate::mousebind::BUTTONS
                 .iter()
                 .enumerate()
@@ -833,6 +853,19 @@ impl App {
     }
 
     /// The monitor the page sets.
+    /// «Обои»: the monitor whose own picture the tiles set (None: all of them).
+    fn wall_out(&self) -> Option<&str> {
+        self.wall_mon.checked_sub(1).and_then(|i| self.m.mons.get(i)).map(|m| m.name.as_str())
+    }
+
+    /// The picture the chosen monitor (or all of them) shows: its own, or the common one.
+    fn wall_shown(&self) -> Option<String> {
+        match self.wall_out() {
+            Some(o) => self.m.wallpapers.iter().find(|(n, _)| n == o).map(|(_, p)| Some(p.clone())).unwrap_or_else(|| self.m.wallpaper.clone()),
+            None => self.m.wallpaper.clone(),
+        }
+    }
+
     fn sel_mon(&self) -> Option<&Mon> {
         self.m.mons.iter().find(|m| m.name == self.mon).or(self.m.mons.first())
     }
@@ -994,7 +1027,8 @@ impl App {
             Page::Wallpaper => {
                 let Some(row) = l.rows.iter().find(|r| r.ctl == Ctl::Walls) else { return };
                 let tiles = self.wall_tiles(row.at);
-                let states: Vec<(bool, bool)> = tiles.iter().zip(&self.walls).map(|(t, (p, _))| (under(*t, self.ptr), *p == self.m.wallpaper)).collect();
+                let shown = self.wall_shown();
+                let states: Vec<(bool, bool)> = tiles.iter().zip(&self.walls).map(|(t, (p, _))| (under(*t, self.ptr), *p == shown)).collect();
                 for (i, (hot, sel)) in states.into_iter().enumerate() {
                     self.anims.drive(AK::WallHot(i), on(hot), SPR_HOVER);
                     self.anims.drive(AK::WallSel(i), on(sel), SPR_SEL);
@@ -1227,10 +1261,26 @@ impl App {
                         Ctl::Switch(Sw::LivePic),
                     ));
                 }
+                if m.mons.len() > 1 {
+                    v.push((
+                        "Монитор".into(),
+                        String::new(),
+                        "«Все мониторы» — одна картинка через все экраны, с учётом их расположения (выбор здесь убирает картинки отдельных мониторов). Выберите монитор, чтобы дать ему свою".into(),
+                        Ctl::Choice(Ch::WallMon),
+                    ));
+                }
+                let own = self.wall_out().filter(|o| m.wallpapers.iter().any(|(n, _)| n == o));
+                if let Some(o) = own {
+                    v.push((format!("У {o} своя картинка"), String::new(), "Вернуть ему общую, как на остальных мониторах".into(), Ctl::Button(Btn::WallAll, "Как на всех")));
+                }
+                let desc = match self.wall_out() {
+                    Some(o) => format!("Картинка только для {o}, на весь его экран. "),
+                    None => "Одна картинка на все мониторы сразу, с учётом их расположения. ".into(),
+                };
                 v.push((
                     "Фон рабочего стола".into(),
                     String::new(),
-                    "Одна картинка на все мониторы сразу, с учётом их расположения. Картинки берутся из «Изображений» (~/Pictures), /usr/share/backgrounds и /usr/share/wallpapers; JPEG и PNG".into(),
+                    desc + "Картинки берутся из «Изображений» (~/Pictures), /usr/share/backgrounds и /usr/share/wallpapers; JPEG и PNG",
                     Ctl::Walls,
                 ));
             }
@@ -1480,6 +1530,12 @@ impl App {
                 self.slider_at(sl, x);
             }
             Ctl::Button(Btn::Calibrate, _) if row.at.contains(x, y) => send("calibrate"),
+            Ctl::Button(Btn::WallAll, _) if row.at.contains(x, y) => {
+                if let Some(o) = self.wall_out().map(str::to_string) {
+                    send(&format!("wallpaper-on {o} all"));
+                    self.m.wallpapers.retain(|(n, _)| *n != o);
+                }
+            }
             Ctl::Button(Btn::Update, _) if row.at.contains(x, y) => self.upd_press(),
             Ctl::Switch(sw @ (Sw::OutMute | Sw::InMute)) => {
                 let input = sw == Sw::InMute;
@@ -1527,6 +1583,7 @@ impl App {
                             self.mon_cmd(&format!("mode {w}x{h}@{r}"));
                         }
                         Ch::Rot => self.mon_cmd(&format!("rot {}", i * 90)),
+                        Ch::WallMon => self.wall_mon = i,
                     }
                     if matches!(ch, Ch::Launch | Ch::Close) {
                         send(&format!("anim {} {i}", if ch == Ch::Launch { "launch" } else { "close" }));
@@ -1618,12 +1675,30 @@ impl App {
                 let tiles = self.wall_tiles(row.at);
                 if let Some(i) = tiles.iter().position(|t| t.inflate(4).contains(x, y)) {
                     let p = self.walls[i].0.clone();
-                    match crate::ipc::request(&format!("wallpaper {}", p.as_deref().unwrap_or("default"))) {
+                    let out = self.wall_out().map(str::to_string);
+                    let cmd = match (&out, &p) {
+                        // The built-in picture spans them all: a monitor's own goes.
+                        (Some(o), None) => format!("wallpaper-on {o} all"),
+                        (Some(o), Some(p)) => format!("wallpaper-on {o} {p}"),
+                        (None, p) => format!("wallpaper {}", p.as_deref().unwrap_or("default")),
+                    };
+                    match crate::ipc::request(&cmd) {
                         Ok(r) if r.contains("err ") => eprintln!("settings: {r}"),
                         Err(e) => eprintln!("settings: {e}"),
                         _ => {}
                     }
-                    self.m.wallpaper = p;
+                    match (out, p) {
+                        (Some(o), p) => {
+                            self.m.wallpapers.retain(|(n, _)| *n != o);
+                            if let Some(p) = p {
+                                self.m.wallpapers.push((o, p));
+                            }
+                        }
+                        (None, p) => {
+                            self.m.wallpapers.clear();
+                            self.m.wallpaper = p;
+                        }
+                    }
                 }
             }
             _ => {}
@@ -1740,7 +1815,8 @@ pub fn run(args: &[String]) -> i32 {
         anims: Anims::default(),
         nav: Drop::at(PAGES.iter().position(|p| p.0 == page).unwrap_or(0) as f32),
         devs: [None, None],
-        chs: [None; 11],
+        chs: [None; 12],
+        wall_mon: 0,
         place: 0,
         mbtn: 0,
         mlayer: 0,
