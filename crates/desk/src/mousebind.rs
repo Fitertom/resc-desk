@@ -124,12 +124,13 @@ impl Act {
 }
 
 /// Key names (as in `key ctrl+shift+t`) and their evdev codes.
-const KEYS: [(&str, u32); 52] = [
+const KEYS: [(&str, u32); 64] = [
     ("ctrl", 29), ("shift", 42), ("alt", 56), ("super", 125), ("altgr", 100),
     ("esc", 1), ("tab", 15), ("enter", 28), ("space", 57), ("backspace", 14), ("delete", 111), ("insert", 110),
     ("home", 102), ("end", 107), ("pageup", 104), ("pagedown", 109),
     ("up", 103), ("down", 108), ("left", 105), ("right", 106),
     ("f1", 59), ("f2", 60), ("f3", 61), ("f4", 62), ("f5", 63), ("f6", 64), ("f7", 65), ("f8", 66), ("f9", 67), ("f10", 68), ("f11", 87), ("f12", 88),
+    ("f13", 183), ("f14", 184), ("f15", 185), ("f16", 186), ("f17", 187), ("f18", 188), ("f19", 189), ("f20", 190), ("f21", 191), ("f22", 192), ("f23", 193), ("f24", 194),
     ("playpause", 164), ("nextsong", 163), ("previoussong", 165), ("stopcd", 166),
     ("volumeup", 115), ("volumedown", 114), ("mute", 113),
     ("print", 99), ("minus", 12), ("equal", 13), ("grave", 41),
@@ -508,7 +509,7 @@ mod tests {
         assert_eq!(Act::parse("key ctrl+c"), Act::Keys(vec![29, 46]));
         assert_eq!(Act::parse("key nonsense+c"), Act::Default);
         assert_eq!(Act::parse("key 1+0"), Act::Keys(vec![2, 11]));
-        for s in ["click left 15", "click right 30 toggle", "macro ctrl+c, 50, ctrl+v", "macro-loop click left, 100, e"] {
+        for s in ["key f19", "click left 15", "click right 30 toggle", "macro ctrl+c, 50, ctrl+v", "macro-loop click left, 100, e"] {
             assert_eq!(Act::parse(s).spec(), s);
         }
         assert_eq!(Act::parse("macro ctrl+c, 50ms, click"), Act::Macro { steps: vec![Step::Tap(vec![29, 46]), Step::Wait(50), Step::Click(0x110)], repeat: false });
