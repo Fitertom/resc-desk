@@ -329,6 +329,10 @@ pub fn pointer_button(d: &mut Desk, button: u32, pressed: bool, time: u32) {
     if pressed {
         // A click during the start-up animation hurries it on.
         crate::boot::poke(d);
+        // A click on the desktop throws the live wallpaper's particles away for a moment.
+        if crate::livewall::active(d) && matches!(wm::hit_test(d, d.seat.x, d.seat.y), Some((wk, _)) if d.windows[wk].desktop()) {
+            crate::livewall::click(d);
+        }
         if d.seat.buttons.contains(&button) {
             return;
         }

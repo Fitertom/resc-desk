@@ -43,6 +43,12 @@ const SPV_SURF_FRAG: &[u8] = include_bytes!("../../../../shaders/spv/surface.fra
 const SPV_BLUR: &[u8] = include_bytes!("../../../../shaders/spv/blur.frag.spv");
 const SPV_DROP_VERT: &[u8] = include_bytes!("../../../../shaders/spv/drop.vert.spv");
 const SPV_DROP_FRAG: &[u8] = include_bytes!("../../../../shaders/spv/drop.frag.spv");
+const SPV_LW_SOLID: &[u8] = include_bytes!("../../../../shaders/spv/lw_solid.frag.spv");
+const SPV_LW_TINT: &[u8] = include_bytes!("../../../../shaders/spv/lw_tint.frag.spv");
+const SPV_LW_SEG_VERT: &[u8] = include_bytes!("../../../../shaders/spv/lw_seg.vert.spv");
+const SPV_LW_SEG_FRAG: &[u8] = include_bytes!("../../../../shaders/spv/lw_seg.frag.spv");
+/// Live wallpaper: the most segments one frame draws into a trail image (16 bytes each).
+const MAX_SEGS: u64 = 65536;
 /// Descriptor sets: three per output plus one per surface and window frame.
 const MAX_SETS: u32 = 4096;
 
@@ -141,6 +147,10 @@ struct Out {
     fresh: bool,
     /// Windows' frosts kept between frames (GlassOp::id).
     gcache: HashMap<u64, GCache>,
+    /// Live wallpaper: the trails (drawn as the background), its set, never drawn yet; the
+    /// moves to draw into it.
+    trail: Option<(Image, H, bool)>,
+    segs: Option<Buffer>,
 }
 
 /// A window glass's frost kept between frames (GlassOp::id): the blurred level, read by
@@ -269,6 +279,12 @@ pub struct Gpu {
     p_lens: H,
     /// drop.frag: a window or the preview card moving as a drop, bridged to the hover drop.
     p_drop: H,
+    /// Live wallpaper (livewall.rs): fade toward a colour, the 1/255 taken off, fade toward
+    /// the picture, a step's moves.
+    p_lw_fade: H,
+    p_lw_sub: H,
+    p_lw_tint: H,
+    p_lw_seg: H,
     outs: Vec<Out>,
     surfs: HashMap<SKey, Tex>,
     /// Closed windows' last pictures (life.rs `holds`): their surfaces are gone.
@@ -283,6 +299,24 @@ pub struct Gpu {
     dma_formats: Vec<(u32, u64)>,
     /// Imported dma-bufs, per wl_buffer (its address; the Weak says when it is gone).
     imports: HashMap<usize, Import>,
+}
+
+/// The live wallpaper's work for one output's frame (livewall.rs): each step's segments in the
+/// segment buffer (first, count), fades owed, toward the picture, line width, image new.
+struct LiveRec {
+    steps: Vec<(u32, u32)>,
+    owed: u32,
+    picture: bool,
+    width: f32,
+    fresh: bool,
+}
+
+/// A pipeline's vertex input: none, the glass's instances (12 vec4), a segment (1 vec4).
+#[derive(Clone, Copy, PartialEq)]
+enum Vin {
+    None,
+    Glass,
+    Seg,
 }
 
 /// A client's dma-buf as an image.
@@ -757,6 +791,10 @@ impl Gpu {
             p_tex: 0,
             p_lens: 0,
             p_drop: 0,
+            p_lw_fade: 0,
+            p_lw_sub: 0,
+            p_lw_tint: 0,
+            p_lw_seg: 0,
             outs: Vec::new(),
             surfs: HashMap::new(),
             ghost_tex: HashMap::new(),
@@ -841,6 +879,10 @@ impl Gpu {
         let m_blur = module(SPV_BLUR)?;
         let m_dvert = module(SPV_DROP_VERT)?;
         let m_dfrag = module(SPV_DROP_FRAG)?;
+        let m_lw_solid = module(SPV_LW_SOLID)?;
+        let m_lw_tint = module(SPV_LW_TINT)?;
+        let m_lw_sv = module(SPV_LW_SEG_VERT)?;
+        let m_lw_sf = module(SPV_LW_SEG_FRAG)?;
         self.p_copy = self.pipeline(m_full, m_layer, false, false, TOPOLOGY_TRIANGLE_LIST)?;
         self.p_over = self.pipeline(m_full, m_layer, true, false, TOPOLOGY_TRIANGLE_LIST)?;
         self.p_shadow = self.pipeline(m_gvert, m_shadow, true, false, TOPOLOGY_TRIANGLE_STRIP)?;
@@ -850,7 +892,11 @@ impl Gpu {
         self.p_blur = self.pipeline(m_full, m_blur, false, false, TOPOLOGY_TRIANGLE_LIST)?;
         // Instanced like the glass (12 vec4 per drop).
         self.p_drop = self.pipeline(m_dvert, m_dfrag, true, true, TOPOLOGY_TRIANGLE_STRIP)?;
-        for m in [m_full, m_layer, m_gvert, m_shadow, m_uivert, m_uifrag, m_svert, m_sfrag, m_gfrag, m_blur, m_dvert, m_dfrag] {
+        self.p_lw_fade = self.pipeline_cfg(m_full, m_lw_solid, Some(0), Vin::None, TOPOLOGY_TRIANGLE_LIST)?;
+        self.p_lw_sub = self.pipeline_cfg(m_full, m_lw_solid, Some(BLEND_OP_REVERSE_SUBTRACT), Vin::None, TOPOLOGY_TRIANGLE_LIST)?;
+        self.p_lw_tint = self.pipeline_cfg(m_full, m_lw_tint, Some(0), Vin::None, TOPOLOGY_TRIANGLE_LIST)?;
+        self.p_lw_seg = self.pipeline_cfg(m_lw_sv, m_lw_sf, Some(0), Vin::Seg, TOPOLOGY_TRIANGLE_STRIP)?;
+        for m in [m_full, m_layer, m_gvert, m_shadow, m_uivert, m_uifrag, m_svert, m_sfrag, m_gfrag, m_blur, m_dvert, m_dfrag, m_lw_solid, m_lw_tint, m_lw_sv, m_lw_sf] {
             (self.f.vkDestroyShaderModule)(dev, m, null);
         }
         Ok(())
@@ -859,6 +905,15 @@ impl Gpu {
     /// A pipeline drawing into a B8G8R8A8 frame. `blend`: premultiplied over; `glass`: ui.vert's
     /// instance attributes and ui.frag specialized to kind 2.
     unsafe fn pipeline(&self, vs: H, fs: H, blend: bool, glass: bool, topology: u32) -> R<H> {
+        self.pipeline_cfg(vs, fs, blend.then_some(0), if glass { Vin::Glass } else { Vin::None }, topology)
+    }
+
+    /// `pipeline` in full: `op` the blend op (premultiplied factors; None: no blending; a
+    /// reverse subtract takes the source off the frame), the vertex input.
+    unsafe fn pipeline_cfg(&self, vs: H, fs: H, op: Option<u32>, vin: Vin, topology: u32) -> R<H> {
+        let glass = vin == Vin::Glass;
+        let blend = op.is_some();
+        let sub = op == Some(BLEND_OP_REVERSE_SUBTRACT);
         let null = std::ptr::null();
         let kind: i32 = 2;
         let entry = SpecializationMapEntry { id: 0, offset: 0, size: 4 };
@@ -868,16 +923,21 @@ impl Gpu {
             PipelineShaderStageCreateInfo { s_type: st::PIPELINE_SHADER_STAGE_CREATE_INFO, p_next: null, flags: 0, stage: SHADER_VERTEX, module: vs, name: cstr(b"main\0"), spec: spec_p },
             PipelineShaderStageCreateInfo { s_type: st::PIPELINE_SHADER_STAGE_CREATE_INFO, p_next: null, flags: 0, stage: SHADER_FRAGMENT, module: fs, name: cstr(b"main\0"), spec: spec_p },
         ];
-        let vb = VertexInputBindingDescription { binding: 0, stride: INST_SIZE as u32, rate: INPUT_RATE_INSTANCE };
+        let (stride, n_attrs) = match vin {
+            Vin::None => (0, 0),
+            Vin::Glass => (INST_SIZE as u32, 12),
+            Vin::Seg => (16, 1),
+        };
+        let vb = VertexInputBindingDescription { binding: 0, stride, rate: INPUT_RATE_INSTANCE };
         let attrs: Vec<VertexInputAttributeDescription> =
-            (0..12).map(|l| VertexInputAttributeDescription { location: l, binding: 0, format: FORMAT_R32G32B32A32_SFLOAT, offset: l * 16 }).collect();
+            (0..n_attrs).map(|l| VertexInputAttributeDescription { location: l, binding: 0, format: FORMAT_R32G32B32A32_SFLOAT, offset: l * 16 }).collect();
         let vi = PipelineVertexInputStateCreateInfo {
             s_type: st::PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             p_next: null,
             flags: 0,
-            binding_count: glass as u32,
+            binding_count: (n_attrs > 0) as u32,
             bindings: &vb,
-            attr_count: if glass { 12 } else { 0 },
+            attr_count: n_attrs,
             attrs: attrs.as_ptr(),
         };
         let ia = PipelineInputAssemblyStateCreateInfo { s_type: st::PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, p_next: null, flags: 0, topology, restart: 0 };
@@ -911,11 +971,11 @@ impl Gpu {
         let att = PipelineColorBlendAttachmentState {
             enable: blend as u32,
             src_color: BLEND_ONE,
-            dst_color: BLEND_ONE_MINUS_SRC_ALPHA,
-            color_op: 0,
+            dst_color: if sub { BLEND_ONE } else { BLEND_ONE_MINUS_SRC_ALPHA },
+            color_op: op.unwrap_or(0),
             src_alpha: BLEND_ONE,
-            dst_alpha: BLEND_ONE_MINUS_SRC_ALPHA,
-            alpha_op: 0,
+            dst_alpha: if sub { BLEND_ONE } else { BLEND_ONE_MINUS_SRC_ALPHA },
+            alpha_op: op.unwrap_or(0),
             write_mask: 0xf,
         };
         let cb = PipelineColorBlendStateCreateInfo { s_type: st::PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, p_next: null, flags: 0, logic_op_enable: 0, logic_op: 0, count: 1, attachments: &att, constants: [0.0; 4] };
@@ -1087,6 +1147,13 @@ impl Gpu {
         self.free_image(&o.backdrop);
         self.free_buffer(&o.readback);
         self.free_buffer(&o.inst);
+        if let Some((img, set, _)) = &o.trail {
+            (self.f.vkFreeDescriptorSets)(self.dev, self.dpool, 1, set);
+            self.free_image(img);
+        }
+        if let Some(b) = &o.segs {
+            self.free_buffer(b);
+        }
     }
 
     /// A texture to upload into and sample: linear filter, or nearest for `exact`
@@ -1534,6 +1601,8 @@ impl Gpu {
             inst,
             fresh: true,
             gcache: HashMap::new(),
+            trail: None,
+            segs: None,
         });
         Ok(self.outs.len() - 1)
     }
@@ -1548,6 +1617,11 @@ impl Gpu {
         let bounds = Rect::new(0, 0, w, h);
         let k = unsafe { self.out(o.id, w, h, o.scale as f32)? };
         let fresh = self.outs[k].fresh;
+        // Live wallpaper: this frame's moves into the output's segment buffer.
+        let lw = match crate::livewall::take(d, oi) {
+            Some(fr) => Some(unsafe { self.live_prep(k, fr)? }),
+            None => None,
+        };
         let mut damage = damage.clone();
         if fresh {
             damage.add(bounds);
@@ -1869,7 +1943,7 @@ impl Gpu {
                 self.outs[k].gcache.insert(op.id, GCache { img, set, level, under: 0, fresh: true });
             }
             self.write_instances(k, &ops, s);
-            captured = self.record(k, &ups, &lcopy, &rects, &ops, &draws, &[ldraws, l2draws], &dmas, s)?;
+            captured = self.record(k, &ups, &lcopy, &rects, &ops, &draws, &[ldraws, l2draws], &dmas, s, lw.as_ref())?;
             let stages = vec![stage::FRAGMENT; waits.len()];
             let si = SubmitInfo {
                 s_type: st::SUBMIT_INFO,
@@ -2001,6 +2075,110 @@ impl Gpu {
     unsafe fn barrier(&self, img: H, range: SubresourceRange, src: (u32, u32, u32), dst: (u32, u32, u32)) {
         let b = ImageMemoryBarrier::new(img, range, src.1, dst.1, src.2, dst.2);
         (self.f.vkCmdPipelineBarrier)(self.cmd, src.0, dst.0, 0, 0, std::ptr::null(), 0, std::ptr::null(), 1, &b);
+    }
+
+    /// The live wallpaper's frame for output `k`: its trail image made if new, the moves
+    /// written into its segment buffer (the newest kept when there are too many).
+    unsafe fn live_prep(&mut self, k: usize, fr: crate::livewall::Frame) -> R<LiveRec> {
+        if self.outs[k].trail.is_none() {
+            let (w, h) = (self.outs[k].w, self.outs[k].h);
+            let img = self.image(w, h, 1, usage::COLOR_ATTACHMENT | usage::SAMPLED)?;
+            let set = self.set(img.view, self.s_near, false)?;
+            self.outs[k].trail = Some((img, set, true));
+        }
+        if self.outs[k].segs.is_none() {
+            let b = self.buffer(MAX_SEGS * 16, usage::VERTEX_BUFFER)?;
+            self.outs[k].segs = Some(b);
+        }
+        let total: usize = fr.steps.iter().map(|s| s.len()).sum();
+        let mut skip = total.saturating_sub(MAX_SEGS as usize);
+        let buf = self.outs[k].segs.as_ref().unwrap();
+        let dst = std::slice::from_raw_parts_mut(buf.ptr as *mut [f32; 4], MAX_SEGS as usize);
+        let mut at = 0usize;
+        let mut steps = Vec::with_capacity(fr.steps.len());
+        for st in &fr.steps {
+            let from = skip.min(st.len());
+            skip -= from;
+            let part = &st[from..];
+            dst[at..at + part.len()].copy_from_slice(part);
+            steps.push((at as u32, part.len() as u32));
+            at += part.len();
+        }
+        let fresh = self.outs[k].trail.as_ref().map_or(false, |t| t.2);
+        if let Some(t) = self.outs[k].trail.as_mut() {
+            t.2 = false;
+        }
+        Ok(LiveRec { steps, owed: fr.owed, picture: fr.on_picture, width: fr.width, fresh })
+    }
+
+    /// The live wallpaper's trails brought up to now (before the frame samples them).
+    unsafe fn live_pass(&self, k: usize, lr: &LiveRec) {
+        let out = &self.outs[k];
+        let Some((img, _, _)) = &out.trail else { return };
+        let Some(segs) = &out.segs else { return };
+        let (f, cmd) = (&self.f, self.cmd);
+        let col = SubresourceRange::color(0, 1);
+        let from = if lr.fresh { (stage::TOP, access::NONE, layout::UNDEFINED) } else { (stage::FRAGMENT, access::SHADER_READ, layout::SHADER_READ) };
+        self.barrier(img.img, col, from, (stage::COLOR_OUTPUT, access::COLOR_WRITE | access::COLOR_READ, layout::COLOR_ATTACHMENT));
+        let att = RenderingAttachmentInfo {
+            s_type: st::RENDERING_ATTACHMENT_INFO,
+            p_next: std::ptr::null(),
+            view: img.view,
+            layout: layout::COLOR_ATTACHMENT,
+            resolve_mode: 0,
+            resolve_view: 0,
+            resolve_layout: 0,
+            load_op: if lr.fresh { LOAD_OP_CLEAR } else { LOAD_OP_LOAD },
+            store_op: STORE_OP_STORE,
+            clear: [0.0, 0.0, 0.0, 1.0],
+        };
+        let area = Rect2D { x: 0, y: 0, w: out.w as u32, h: out.h as u32 };
+        let ri = RenderingInfo { s_type: st::RENDERING_INFO, p_next: std::ptr::null(), flags: 0, area, layer_count: 1, view_mask: 0, color_count: 1, colors: &att, depth: std::ptr::null(), stencil: std::ptr::null() };
+        (f.vkCmdBeginRendering)(cmd, &ri);
+        let vp = Viewport { x: 0.0, y: 0.0, w: out.w as f32, h: out.h as f32, min_depth: 0.0, max_depth: 1.0 };
+        (f.vkCmdSetViewport)(cmd, 0, 1, &vp);
+        (f.vkCmdSetScissor)(cmd, 0, 1, &area);
+        let (w, h) = (out.w as f32, out.h as f32);
+        let push = |p: [f32; 8]| {
+            let mut pc = [0f32; (PC_SIZE / 4) as usize];
+            pc[..8].copy_from_slice(&p);
+            (f.vkCmdPushConstants)(cmd, self.layout, SHADER_VERTEX | SHADER_FRAGMENT, 0, PC_SIZE, pc.as_ptr() as P);
+        };
+        // One fade (×(1 − a)) toward black, or toward the picture.
+        let fade = |a: f32| {
+            if lr.picture {
+                (f.vkCmdBindPipeline)(cmd, BIND_GRAPHICS, self.p_lw_tint);
+                (f.vkCmdBindDescriptorSets)(cmd, BIND_GRAPHICS, self.layout, 0, 1, &out.wall.set, 0, std::ptr::null());
+                push([w, h, 0.0, a, 0.0, 0.0, 0.0, 0.0]);
+                (f.vkCmdDraw)(cmd, 3, 1, 0, 0);
+            } else {
+                (f.vkCmdBindPipeline)(cmd, BIND_GRAPHICS, self.p_lw_fade);
+                push([w, h, 0.0, 0.0, 0.0, 0.0, 0.0, a]);
+                (f.vkCmdDraw)(cmd, 3, 1, 0, 0);
+                (f.vkCmdBindPipeline)(cmd, BIND_GRAPHICS, self.p_lw_sub);
+                push([w, h, 0.0, 0.0, 1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0, 0.0]);
+                (f.vkCmdDraw)(cmd, 3, 1, 0, 0);
+            }
+        };
+        if lr.fresh && lr.picture {
+            fade(1.0);
+        }
+        if lr.owed > 0 {
+            fade(1.0 - 0.8f32.powi(lr.owed.min(64) as i32));
+        }
+        for &(first, n) in &lr.steps {
+            fade(0.2);
+            if n == 0 {
+                continue;
+            }
+            (f.vkCmdBindPipeline)(cmd, BIND_GRAPHICS, self.p_lw_seg);
+            let off = 0u64;
+            (f.vkCmdBindVertexBuffers)(cmd, 0, 1, &segs.buf, &off);
+            push([w, h, lr.width, 0.0, 1.0, 1.0, 1.0, 1.0]);
+            (f.vkCmdDraw)(cmd, 4, n, 0, first);
+        }
+        (f.vkCmdEndRendering)(cmd);
+        self.barrier(img.img, col, (stage::COLOR_OUTPUT, access::COLOR_WRITE, layout::COLOR_ATTACHMENT), (stage::FRAGMENT, access::SHADER_READ, layout::SHADER_READ));
     }
 
     unsafe fn begin_rendering(&self, k: usize, scissor: Rect) {
@@ -2308,7 +2486,7 @@ impl Gpu {
     }
 
     #[allow(clippy::too_many_arguments)]
-    unsafe fn record(&self, k: usize, ups: &[Upload], lcopy: &[Vec<Rect>; 2], rects: &[Rect], ops: &[GlassOp], draws: &[Draw], ldraws: &[Vec<Draw>; 2], dmas: &[(H, bool)], s: f32) -> R<Vec<bool>> {
+    unsafe fn record(&self, k: usize, ups: &[Upload], lcopy: &[Vec<Rect>; 2], rects: &[Rect], ops: &[GlassOp], draws: &[Draw], ldraws: &[Vec<Draw>; 2], dmas: &[(H, bool)], s: f32, live: Option<&LiveRec>) -> R<Vec<bool>> {
         let mut captured = vec![false; ops.len()];
         let out = &self.outs[k];
         let (f, cmd) = (&self.f, self.cmd);
@@ -2362,11 +2540,19 @@ impl Gpu {
         let old = if fresh { layout::UNDEFINED } else { layout::TRANSFER_SRC };
         self.barrier(out.target.img, col, (stage::TRANSFER, access::NONE, old), (stage::COLOR_OUTPUT, access::COLOR_WRITE | access::COLOR_READ, layout::COLOR_ATTACHMENT));
 
+        // 1b. The live wallpaper's trails: this frame's fades and moves.
+        if let Some(lr) = live {
+            self.live_pass(k, lr);
+        }
+        let bg = match (live, &out.trail) {
+            (Some(_), Some((_, set, _))) => *set,
+            _ => out.wall.set,
+        };
         // 2. The frame, bottom to top, in every rect.
         let m = crate::glass::margin(s);
         for w in rects {
             self.begin_rendering(k, *w);
-            self.draw_full(out.wall.set, false);
+            self.draw_full(bg, false);
             // The windows, bottom to top; a window's glass right before it, over what is
             // below it by then.
             let mut start = 0;
@@ -2455,7 +2641,7 @@ impl Drop for Gpu {
             for (b, _) in std::mem::take(&mut self.arena) {
                 self.free_buffer(&b);
             }
-            for p in [self.p_copy, self.p_over, self.p_shadow, self.p_glass, self.p_tex, self.p_lens, self.p_blur, self.p_drop] {
+            for p in [self.p_copy, self.p_over, self.p_shadow, self.p_glass, self.p_tex, self.p_lens, self.p_blur, self.p_drop, self.p_lw_fade, self.p_lw_sub, self.p_lw_tint, self.p_lw_seg] {
                 (self.f.vkDestroyPipeline)(self.dev, p, null);
             }
             for s in [self.s_near, self.s_mip, self.s_lin] {

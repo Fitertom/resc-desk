@@ -1417,6 +1417,7 @@ pub fn tick(d: &mut Desk) -> bool {
     moving |= crate::osd::tick(d, dt as f32);
     moving |= crate::clipboard::tick(d, dt as f32);
     moving |= crate::toast::tick(d, dt as f32);
+    moving |= crate::livewall::tick(d, dt as f32);
     moving |= lens_tick(d, dt as f32);
     moving
 }

@@ -129,6 +129,8 @@ pub struct Desk {
     /// `Rc::as_ptr`: their release waits until they are off the screen (the client's
     /// wl_buffer to release then, once it was let go).
     pub on_screen: std::collections::HashMap<usize, Option<(crate::slab::Key, wl::ObjId)>>,
+    /// The live wallpaper, when on (livewall.rs).
+    pub live: Option<Box<crate::livewall::Live>>,
     /// Monitors: the Win+P panel, a reconfiguration to do (monitors.rs).
     pub mons: crate::monitors::State,
     /// Vulkan renderer; None: the CPU draws everything (gpu.rs `init`).

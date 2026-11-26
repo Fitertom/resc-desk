@@ -251,6 +251,18 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             out.push_str(&format!("glue {}
 ", if d.display_cfg.glue { "on" } else { "off" }));
         }
+        // livewall on|picture|off: the live wallpaper «Частицы» (on: on black, picture: over
+        // the wallpaper's picture).
+        "livewall" => {
+            match rest.first().copied() {
+                Some("on") | Some("particles") => crate::livewall::set(d, true, false),
+                Some("picture") => crate::livewall::set(d, true, true),
+                Some("off") => crate::livewall::set(d, false, false),
+                _ => {}
+            }
+            let _ = crate::layout::save_config(d);
+            out.push_str(match &d.live { Some(l) if l.on_picture => "livewall: picture\n", Some(_) => "livewall: on\n", None => "livewall: off\n" });
+        }
         // fullscreen: the focused window on or off fullscreen (tests).
         "fullscreen" => {
             if let Some(wk) = crate::wm::focused(d) {

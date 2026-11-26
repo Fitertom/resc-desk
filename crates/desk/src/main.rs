@@ -1,6 +1,7 @@
 //! resc-desk: a Wayland compositor + desktop shell written from scratch in Rust.
 mod anim;
 mod prof;
+mod livewall;
 mod toast;
 mod xcursor;
 mod apps;
@@ -252,6 +253,7 @@ fn main() {
         clip: Default::default(),
         toasts: Vec::new(),
         on_screen: Default::default(),
+        live: None,
         mons: Default::default(),
         gpu: None,
         bench: Default::default(),
@@ -297,6 +299,10 @@ fn main() {
     }
     d.gpu = gpu::init();
     dmabuf::init(&mut d);
+    if d.display_cfg.wallpaper_live {
+        let pic = d.display_cfg.wallpaper_live_picture;
+        livewall::set(&mut d, true, pic);
+    }
     if let Some((x, y)) = d.outputs.get(monitors::primary_index(&d)).map(|o| o.rect().center()) {
         d.seat.x = x as f64;
         d.seat.y = y as f64;

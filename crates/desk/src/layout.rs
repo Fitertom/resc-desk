@@ -25,6 +25,9 @@ pub struct DisplayConfig {
     /// a bezel); heights and physical scale stay as calibrated.
     pub glue: bool,
     pub wallpaper: Option<String>,
+    /// Live wallpaper «Частицы» (livewall.rs), its trails fading toward the picture.
+    pub wallpaper_live: bool,
+    pub wallpaper_live_picture: bool,
     /// Settings: frosted or clear glass, and the frost's sigma (CSS px).
     pub glass_frosted: bool,
     pub glass_blur: f32,
@@ -66,6 +69,8 @@ pub fn load_config() -> DisplayConfig {
         planes: HashMap::new(),
         glue: false,
         wallpaper: None,
+        wallpaper_live: false,
+        wallpaper_live_picture: false,
         glass_frosted: true,
         glass_blur: crate::glass::FROST,
         glass_bezel: crate::glass::BEZEL,
@@ -88,6 +93,10 @@ pub fn load_config() -> DisplayConfig {
         let f: Vec<&str> = line.split_whitespace().collect();
         match f.as_slice() {
             ["ui_scale", v] => c.ui_scale = v.parse().unwrap_or(1.0f64).clamp(0.5, 4.0),
+            ["wallpaper_live", v] => {
+                c.wallpaper_live = *v != "off";
+                c.wallpaper_live_picture = *v == "picture";
+            }
             ["glue", v] => c.glue = *v == "on",
             ["glass_frost", v] => c.glass_frosted = *v != "off",
             ["glass_win_bezel", v] => c.glass_win_bezel = v.parse().unwrap_or(crate::glass::WIN_BEZEL).clamp(0.0, crate::glass::MAX_BEZEL),
@@ -131,6 +140,9 @@ pub fn save_config(d: &Desk) -> std::io::Result<String> {
     s.push_str(&format!("glue {}\n", if d.display_cfg.glue { "on" } else { "off" }));
     if let Some(w) = &d.display_cfg.wallpaper {
         s.push_str(&format!("wallpaper {w}\n"));
+    }
+    if d.display_cfg.wallpaper_live {
+        s.push_str(&format!("wallpaper_live {}\n", if d.display_cfg.wallpaper_live_picture { "picture" } else { "particles" }));
     }
     s.push_str(&format!("glass_frost {}\n", if d.display_cfg.glass_frosted { "on" } else { "off" }));
     s.push_str(&format!("glass_blur {}\n", d.display_cfg.glass_blur));
