@@ -518,6 +518,11 @@ impl Desk {
         c.env("GDK_BACKEND", "wayland");
         c.env("QT_QPA_PLATFORM", "wayland");
         c.env("MOZ_ENABLE_WAYLAND", "1");
+        // The cursor's size, as ours (xcursor.rs): without it X programs (Steam, Electron
+        // apps) size theirs by the screen's height, ~36 px on these monitors.
+        if std::env::var_os("XCURSOR_SIZE").is_none() {
+            c.env("XCURSOR_SIZE", crate::xcursor::base_size().to_string());
+        }
         // Our own apps (resc-desk settings, ...) talk back through the control socket.
         let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
         c.env("RESC_DESK_CTL", format!("{runtime}/resc-desk-{}.ctl", self.socket_name));
