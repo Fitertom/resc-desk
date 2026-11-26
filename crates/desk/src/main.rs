@@ -40,6 +40,7 @@ mod tray;
 mod render;
 mod server;
 mod settings;
+mod mousepic;
 mod screencopy;
 mod shell;
 mod shm;

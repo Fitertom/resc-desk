@@ -107,6 +107,10 @@ const TILE_GAP: i32 = 12;
 const TILE_LABEL: i32 = 24;
 /// «Своё действие»'s field.
 const EDIT_H: i32 = 38;
+/// The mouse's picture (logical px; mousepic.rs units × 1), and its labels' width and spacing.
+const PIC_H: i32 = 360;
+const PIC_LABEL_W: i32 = 190;
+const PIC_GAP: f32 = 40.0;
 const DEV_ROW: i32 = 38;
 /// «Удалить» at the right end of a paired Bluetooth device's row.
 const BT_FORGET_W: i32 = 84;
@@ -227,6 +231,8 @@ enum Ctl {
     Bt(bool),
     /// «Мышь»: the chosen button's action as text (a macro, an autoclicker of one's own).
     Edit,
+    /// «Мышь»: the mouse drawn, its buttons named (mousepic.rs).
+    MousePic,
 }
 
 // ------------------------------------------------------------------ the compositor's state
@@ -494,6 +500,8 @@ struct App {
     medit: crate::textedit::TextField,
     medit_on: bool,
     medit_err: Option<String>,
+    /// The mouse's picture as last drawn: the part lit, the size (physical px), the pixels.
+    mpic: std::cell::RefCell<Option<(Option<&'static str>, usize, Vec<u32>)>>,
     /// The update: its state, and the thread's answer to come.
     upd: Upd,
     upd_rx: Option<std::sync::mpsc::Receiver<Upd>>,
@@ -791,6 +799,50 @@ impl App {
                 let cur = self.mbind(self.mbtn, self.mlayer);
                 MOUSE_ACTS.iter().position(|(_, s)| *s == cur).unwrap_or(MOUSE_ACTS.len())
             }
+        }
+    }
+
+    /// The mouse's picture in `at`: its square (logical), the scale of its units, and each
+    /// label: the part, its rect, where its leader starts and ends.
+    fn mpic_geom(at: Rect) -> (Rect, f32, Vec<(usize, Rect, (f32, f32), (f32, f32))>) {
+        use crate::mousepic as mp;
+        let k = PIC_H as f32 / mp::H;
+        let sq = Rect::new(at.x + (at.w - PIC_H) / 2, at.y, PIC_H, PIC_H);
+        let ox = sq.x as f32 + (PIC_H as f32 - mp::W * k) / 2.0;
+        let mut v = Vec::new();
+        for left in [true, false] {
+            // The mouse's own edge on that side (picture units), and the labels beyond it.
+            let edge = if left { 40.0 } else { 232.0 };
+            for (i, ly) in mp::label_ys(left, PIC_GAP) {
+                let p = &mp::PARTS[i];
+                let y = sq.y as f32 + ly * k;
+                let ex = ox + edge * k;
+                let r = if left {
+                    Rect::new((ex as i32 - 14 - PIC_LABEL_W).max(at.x), y as i32 - 17, PIC_LABEL_W, 36)
+                } else {
+                    Rect::new((ex as i32 + 14).min(at.x1() - PIC_LABEL_W), y as i32 - 17, PIC_LABEL_W, 36)
+                };
+                let start = (if left { r.x1() as f32 + 4.0 } else { r.x as f32 - 4.0 }, y);
+                let end = (ox + p.anchor.0 * k, sq.y as f32 + p.anchor.1 * k);
+                v.push((i, r, start, end));
+            }
+        }
+        (sq, k, v)
+    }
+
+    /// A click on the mouse's picture: the part under it (or whose label it is) chosen.
+    fn mpic_press(&mut self, at: Rect, x: f64, y: f64) {
+        use crate::mousepic as mp;
+        let (sq, k, labels) = Self::mpic_geom(at);
+        let ox = sq.x as f32 + (PIC_H as f32 - mp::W * k) / 2.0;
+        let part = labels
+            .iter()
+            .find(|(_, r, _, _)| r.contains(x, y))
+            .map(|(i, ..)| &mp::PARTS[*i])
+            .or_else(|| mp::hit((x as f32 - ox) / k, (y as f32 - sq.y as f32) / k));
+        if let Some(b) = part.and_then(|p| p.bind).and_then(|n| crate::mousebind::BUTTONS.iter().position(|b| b.0 == n)) {
+            self.mbtn = b;
+            self.medit_on = false;
         }
     }
 
@@ -1391,6 +1443,12 @@ impl App {
                     "У каждой кнопки два назначения: обычное и пока зажата кнопка G-Shift (назначьте её любой кнопке). Сочетание клавиш держится, пока держится кнопка. Своё сочетание или команду можно вписать в ~/.config/resc-desk/mouse.conf: bind side 1 key ctrl+shift+t, bind extra 0 cmd firefox".into(),
                     Ctl::None,
                 ));
+                v.push((
+                    "Logitech G502 HERO".into(),
+                    String::new(),
+                    "Щёлкните кнопку на мыши или её подпись — ниже выберите, что она делает. G6–G9 пока меняют DPI внутри самой мыши: чтобы назначать и их, desk должен говорить с мышью напрямую (правило udev для hidraw)".into(),
+                    Ctl::MousePic,
+                ));
                 v.push(("Кнопка".into(), String::new(), String::new(), Ctl::Choice(Ch::MBtn)));
                 v.push(("Когда".into(), String::new(), String::new(), Ctl::Choice(Ch::MLayer)));
                 v.push(("Что делает".into(), String::new(), String::new(), Ctl::Choice(Ch::MAct)));
@@ -1475,6 +1533,7 @@ impl App {
                 Ctl::Choice(ch) => h += self.opts(ch).len() as i32 * DEV_ROW - 6,
                 Ctl::Plane => h += PLANE_H,
                 Ctl::Edit => h += EDIT_H,
+                Ctl::MousePic => h += PIC_H,
                 _ => {}
             }
             let card = Rect::new(cx, y, cw, h);
@@ -1482,7 +1541,7 @@ impl App {
                 Ctl::Switch(_) => Rect::new(card.x1() - CARD_PAD - SWITCH_W as i32, card.y + (card.h - SWITCH_H as i32) / 2, SWITCH_W as i32, SWITCH_H as i32),
                 Ctl::Slider(_) => Rect::new(card.x + CARD_PAD, card.y1() - CARD_PAD - SLIDER_H + 4, card.w - 2 * CARD_PAD, SLIDER_H),
                 Ctl::Button(..) => Rect::new(card.x1() - CARD_PAD - BTN_W, card.y + (card.h - BTN_H) / 2, BTN_W, BTN_H),
-                Ctl::Walls | Ctl::Devices(_) | Ctl::Choice(_) | Ctl::Plane | Ctl::Bt(_) | Ctl::Edit => Rect::from_edges(card.x + CARD_PAD, card.y + body_y + 6, card.x1() - CARD_PAD, card.y1() - CARD_PAD),
+                Ctl::Walls | Ctl::Devices(_) | Ctl::Choice(_) | Ctl::Plane | Ctl::Bt(_) | Ctl::Edit | Ctl::MousePic => Rect::from_edges(card.x + CARD_PAD, card.y + body_y + 6, card.x1() - CARD_PAD, card.y1() - CARD_PAD),
                 Ctl::None => Rect::default(),
             };
             rows.push(Row { name, value, desc, ctl, card, at });
@@ -1563,6 +1622,10 @@ impl App {
         let l = self.layout();
         // «Своё действие»: a click in it starts typing (the action as it is, all selected), a
         // click elsewhere ends it.
+        if let Some(at) = l.rows.iter().find(|r| r.ctl == Ctl::MousePic && r.at.contains(x, y)).map(|r| r.at) {
+            self.mpic_press(at, x, y);
+            return;
+        }
         let on_edit = l.rows.iter().any(|r| r.ctl == Ctl::Edit && r.at.contains(x, y));
         if on_edit && !self.medit_on {
             self.medit.set(&self.mbind(self.mbtn, self.mlayer));
@@ -1892,6 +1955,7 @@ pub fn run(args: &[String]) -> i32 {
         medit: Default::default(),
         medit_on: false,
         medit_err: None,
+        mpic: Default::default(),
         mon: String::new(),
         pdrag: None,
         upd: Upd::Idle,
@@ -2445,6 +2509,48 @@ fn draw_page(app: &App, cv: &mut Canvas, l: &Layout) {
             }
             Ctl::Slider(sl) => slider(cv, vclip, xf, row.at, app.anims.get(AK::Slider(sl))),
             Ctl::Button(_, label) => button(cv, vclip, xf, row.at, label, app.anims.get(AK::Btn)),
+            Ctl::MousePic => {
+                use crate::mousepic as mp;
+                let (sq, _, labels) = App::mpic_geom(row.at);
+                let chosen = crate::mousebind::BUTTONS.get(app.mbtn).map(|b| b.0);
+                let sel = mp::PARTS.iter().find(|p| p.bind.is_some() && p.bind == chosen).map(|p| p.id);
+                let size = (PIC_H as f64 * xf.scale).round() as usize;
+                let mut cache = app.mpic.borrow_mut();
+                if cache.as_ref().map_or(true, |c| c.0 != sel || c.1 != size) {
+                    let px = crate::svg::render(&mp::svg(sel, crate::look::accent() & 0xff_ffff), size).unwrap_or_default();
+                    *cache = Some((sel, size, px));
+                }
+                if let Some((_, n, px)) = cache.as_ref().filter(|c| c.2.len() == c.1 * c.1) {
+                    let dst = xf.r(sq);
+                    cv.blit(vclip, Rect::new(dst.x, dst.y, *n as i32, *n as i32), px, *n, Rect::new(0, 0, *n as i32, *n as i32), false, 255);
+                }
+                let pt = |p: (f32, f32)| {
+                    let r = xf.r(Rect::new(p.0.round() as i32, p.1.round() as i32, 1, 1));
+                    (r.x as f32, r.y as f32)
+                };
+                for (i, r, start, end) in &labels {
+                    let p = &mp::PARTS[*i];
+                    let on = p.id == sel.unwrap_or("");
+                    let ink = if on { crate::look::accent() } else { 0x80ff_ffff };
+                    // Leader: level out of the label, then to the button.
+                    let elbow = (if p.left { start.0 + 10.0 } else { start.0 - 10.0 }, start.1);
+                    cv.line(vclip, pt(*start), pt(elbow), xf.scale as f32, ink);
+                    cv.line(vclip, pt(elbow), pt(*end), xf.scale as f32, ink);
+                    let dot = xf.r(Rect::new(end.0 as i32 - 2, end.1 as i32 - 2, 5, 5));
+                    cv.rrect(vclip, dot, xf.len(2), ink);
+                    let act = match p.bind.and_then(|n| crate::mousebind::BUTTONS.iter().position(|b| b.0 == n)) {
+                        Some(b) => App::mact_label(&app.mbind(b, app.mlayer)),
+                        None => "DPI — в самой мыши".to_string(),
+                    };
+                    let (name_c, act_c) = if on { (text_color(1.0), crate::look::accent()) } else if p.bind.is_some() { (text_color(0.9), text_color(0.6)) } else { (text_color(0.45), text_color(0.35)) };
+                    let w1 = font::text_width_w(p.label, 13.0, font::W::Semi).min(r.w);
+                    let act = crate::shell::ellipsize(&act, 12.0, font::W::Text, r.w);
+                    let w2 = font::text_width(&act, 12.0).min(r.w);
+                    let (x1, x2) = if p.left { (r.x1() - w1, r.x1() - w2) } else { (r.x, r.x) };
+                    font::draw_text_w(cv, vclip, xf, x1, r.y + 14, p.label, 13.0, name_c, r.w, font::W::Semi);
+                    font::draw_text(cv, vclip, xf, x2, r.y + 31, &act, 12.0, act_c, r.w);
+                }
+            }
             Ctl::Edit => {
                 let r = Rect::new(row.at.x, row.at.y, row.at.w, EDIT_H - 6);
                 let p = xf.r(r);
