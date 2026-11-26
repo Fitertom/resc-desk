@@ -224,6 +224,25 @@ fn start_clock(d: &mut Desk) {
 /// Starts `cmd`, a program whose icon is `icon` and whose windows may be called one of
 /// `names`, clicked at `origin` (its icon there, logical).
 pub fn launch(d: &mut Desk, cmd: &str, icon: &str, names: &[&str], origin: Option<Rect>) {
+    let mut names: Vec<String> = names.iter().filter(|n| !n.is_empty()).map(|n| n.to_lowercase()).collect();
+    names.dedup();
+    // Clicked again while it is still loading: once is enough (a second Steam would only
+    // leave a drop breathing for nothing).
+    if !names.is_empty() && d.overlay.life.launches.iter().any(|l| l.waiting() && l.names == names) {
+        return;
+    }
+    // Already running: its window comes forward. The command still runs (a program that
+    // opens more windows, a terminal, gets its new one), but no drop waits for a window:
+    // one-instance programs (Steam, Telegram) only wake the one they have.
+    // («Проводник» opens a window each time, with its drop: not this way.)
+    let multi = names.iter().any(|n| n == "resc.files");
+    let running = if multi { None } else { d.windows.iter().filter(|(_, w)| w.parent.is_none() && names_match(&names, &w.app_id)).map(|(k, _)| k).last() };
+    if let Some(wk) = running {
+        d.spawn(cmd);
+        crate::wm::unminimize(d, wk);
+        crate::wm::focus_window(d, Some(wk));
+        return;
+    }
     d.spawn(cmd);
     if d.outputs.is_empty() {
         return;
@@ -232,8 +251,6 @@ pub fn launch(d: &mut Desk, cmd: &str, icon: &str, names: &[&str], origin: Optio
     let l = &mut d.overlay.life;
     l.next += 1;
     let id = l.next;
-    let mut names: Vec<String> = names.iter().filter(|n| !n.is_empty()).map(|n| n.to_lowercase()).collect();
-    names.dedup();
     l.launches.push(Launch { id, icon: icon.to_string(), names, origin, t: 0.0, flying: None, giving_up: None });
     if origin.is_none() {
         l.slots.push(Slot::new(Key::Launch(id), true));
@@ -249,13 +266,19 @@ pub fn launch_cmd(d: &mut Desk, cmd: &str) {
     launch(d, cmd, &name, &[&name], None);
 }
 
+/// Whether a window with app id `app` belongs to a program called `names` (lowercase).
+fn names_match(names: &[String], app: &str) -> bool {
+    let a = app.to_lowercase();
+    !a.is_empty() && names.iter().any(|n| *n == a || n.rsplit('.').next() == Some(a.as_str()) || a.rsplit('.').next() == Some(n.as_str()))
+}
+
 /// The launch window `wk` comes from: one whose names match its app id, else the oldest
 /// still waiting.
 fn pick_launch(d: &Desk, wk: WKey) -> Option<usize> {
     let w = d.windows.get(wk)?;
     let a = w.app_id.to_lowercase();
     let ls = &d.overlay.life.launches;
-    let named = |l: &Launch| !a.is_empty() && l.names.iter().any(|n| *n == a || n.rsplit('.').next() == Some(a.as_str()) || a.rsplit('.').next() == Some(n.as_str()));
+    let named = |l: &Launch| names_match(&l.names, &a);
     ls.iter().position(|l| l.waiting() && named(l)).or_else(|| ls.iter().position(|l| l.waiting()))
 }
 
