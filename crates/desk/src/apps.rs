@@ -11,11 +11,22 @@ pub struct App {
     pub wmclass: String,
 }
 
-pub fn load() -> Vec<App> {
+fn dirs() -> Vec<String> {
     let mut dirs = vec!["/usr/share/applications".to_string(), "/usr/local/share/applications".to_string()];
     if let Ok(h) = std::env::var("HOME") {
         dirs.push(format!("{h}/.local/share/applications"));
     }
+    dirs
+}
+
+/// When the folders of .desktop files last changed (a program installed or removed): the
+/// start menu reads them again when this is not what it read them at.
+pub fn stamp() -> Vec<Option<std::time::SystemTime>> {
+    dirs().iter().map(|d| std::fs::metadata(d).and_then(|m| m.modified()).ok()).collect()
+}
+
+pub fn load() -> Vec<App> {
+    let dirs = dirs();
     let terminal = std::env::var("RESC_TERMINAL").unwrap_or_else(|_| "foot".into());
     let mut apps: Vec<App> = Vec::new();
     for dir in dirs {

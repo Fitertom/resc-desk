@@ -111,6 +111,8 @@ pub struct Desk {
     /// The taskbar's right island: sound, calendar.
     pub tray: crate::tray::Tray,
     pub apps: Vec<crate::apps::App>,
+    /// The folders' times `apps` was read at (`apps::stamp`).
+    pub apps_stamp: Vec<Option<std::time::SystemTime>>,
     pub pending_screenshot: Option<String>,
     /// Screen copies waiting for pixels (screencopy.rs).
     pub screencopy: Vec<crate::screencopy::Pending>,

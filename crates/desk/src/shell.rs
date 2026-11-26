@@ -1452,8 +1452,10 @@ fn toggle_start_on(d: &mut Desk, oi: usize) {
     }
     d.overlay.switcher = None;
     crate::tray::close(d);
-    if d.apps.is_empty() {
+    let stamp = crate::apps::stamp();
+    if d.apps.is_empty() || stamp != d.apps_stamp {
         d.apps = crate::apps::load();
+        d.apps_stamp = stamp;
     }
     d.start_field.clear();
     d.start_sel = 0;

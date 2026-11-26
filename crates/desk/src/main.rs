@@ -244,6 +244,7 @@ fn main() {
         start: Default::default(),
         tray: Default::default(),
         apps: vec![],
+        apps_stamp: vec![],
         pending_screenshot: None,
         screencopy: Vec::new(),
         display_cfg: layout::load_config(),
