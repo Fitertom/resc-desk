@@ -11,6 +11,7 @@ mod draw;
 mod input;
 #[cfg(test)]
 mod tests;
+mod thumbs;
 pub mod model;
 pub mod open;
 pub mod ops;
@@ -553,6 +554,8 @@ pub struct App {
     last_click: (u64, Hit),
     typeahead: (String, u64),
     pub dirty: bool,
+    /// Pictures' and videos' previews (thumbs.rs).
+    pub thumbs: std::cell::RefCell<thumbs::Thumbs>,
     pub quit: bool,
     pub title: String,
     /// New things made here: they stay at the end until F5 (as in Windows).
@@ -760,6 +763,7 @@ impl App {
             last_click: (0, Hit::None),
             typeahead: (String::new(), 0),
             dirty: true,
+            thumbs: std::cell::RefCell::new(thumbs::Thumbs::new()),
             quit: false,
             title: String::new(),
             fresh: vec![],
@@ -2918,6 +2922,8 @@ pub fn run(args: &[String]) -> i32 {
     loop {
         let wait = if app.animating() {
             16
+        } else if app.thumbs.borrow().busy() {
+            50
         } else if app.ops_busy() || app.searching || app.rename_at.is_some() || app.search_at.is_some() || app.reload_at.is_some() || app.props_rx.is_some() || app.hash_rx.is_some() || app.toast.is_some() || app.press.as_ref().map_or(false, |p| p.dragging) || app.incoming.is_some() {
             100
         } else {
@@ -2926,6 +2932,9 @@ pub fn run(args: &[String]) -> i32 {
         };
         if crate::look::poll() {
             crate::icons::reset();
+            app.dirty = true;
+        }
+        if app.thumbs.get_mut().poll() {
             app.dirty = true;
         }
         let evs = match win.poll(wait) {

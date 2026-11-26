@@ -163,3 +163,21 @@ pub fn encode(px: &[u32], w: i32, h: i32, stride: usize, step: usize) -> Vec<u8>
     chunk(&mut out, &t, b"IEND", &[]);
     out
 }
+
+/// `encode` with tEXt chunks (key, value) after the header: the thumbnail cache's
+/// `Thumb::URI` and `Thumb::MTime`.
+pub fn encode_text(px: &[u32], w: i32, h: i32, stride: usize, texts: &[(&str, &str)]) -> Vec<u8> {
+    let png = encode(px, w, h, stride, 1);
+    // Signature (8) and IHDR (4 + 4 + 13 + 4).
+    let at = 8 + 25;
+    let t = crc_table();
+    let mut out = png[..at].to_vec();
+    for (k, v) in texts {
+        let mut body = k.as_bytes().to_vec();
+        body.push(0);
+        body.extend_from_slice(v.as_bytes());
+        chunk(&mut out, &t, b"tEXt", &body);
+    }
+    out.extend_from_slice(&png[at..]);
+    out
+}

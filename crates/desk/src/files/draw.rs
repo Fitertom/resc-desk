@@ -473,7 +473,11 @@ fn content(app: &App, cv: &mut Canvas) {
         let renaming = app.rename.as_ref().filter(|x| x.0 == i).map(|x| &x.1);
         match app.view.mode {
             Mode::Details => row(app, cv, clip, r, it, faded, renaming),
-            Mode::Icons(s) => tile_icon(cv, clip, r, s, it, faded, app.desk, renaming),
+            Mode::Icons(s) => {
+                // Pictures and videos as themselves from the normal size up.
+                let th = if s >= 48 && !it.e.dir && it.inner.is_empty() { thumbs::kind(&it.e.ext).and_then(|v| app.thumbs.borrow_mut().get(&it.e.path, it.e.mtime, v)) } else { None };
+                tile_icon(cv, clip, r, s, it, faded, app.desk, renaming, th.as_deref())
+            }
             Mode::Tiles => tile_pc(cv, clip, r, it),
         }
     }
@@ -548,9 +552,12 @@ fn two_lines(s: &str, size: f32, w: i32) -> Vec<String> {
     vec![a.trim_end().to_string(), b.trim_start().to_string()]
 }
 
-fn tile_icon(cv: &mut Canvas, clip: Rect, r: Rect, s: i32, it: &Item, faded: bool, wall: bool, renaming: Option<&TextField>) {
+fn tile_icon(cv: &mut Canvas, clip: Rect, r: Rect, s: i32, it: &Item, faded: bool, wall: bool, renaming: Option<&TextField>, th: Option<&thumbs::Thumb>) {
     let ic = Rect::new(r.x + (r.w - s) / 2, r.y + 8, s, s);
-    item_icon(cv, clip, ic, it);
+    match th {
+        Some(t) => preview(cv, clip, ic, t),
+        None => item_icon(cv, clip, ic, it),
+    }
     if faded {
         cv.fill(clip, ic, argb(110, 23, 24, 31));
     }
@@ -573,6 +580,27 @@ fn tile_icon(cv: &mut Canvas, clip: Rect, r: Rect, s: i32, it: &Item, faded: boo
             text(cv, clip, x, y, l, 12.5, fade_col(argb(255, 255, 255, 255), faded), r.w - 8);
         } else {
             text(cv, clip, x, y, l, 12.5, fade_col(FG, faded), r.w - 8);
+        }
+    }
+}
+
+/// A preview fitted into the icon's square, standing on its bottom edge, with a thin rim; a
+/// video's gets a play mark.
+fn preview(cv: &mut Canvas, clip: Rect, ic: Rect, t: &thumbs::Thumb) {
+    let k = (ic.w as f64 / t.w as f64).min(ic.h as f64 / t.h as f64);
+    let (w, h) = (((t.w as f64 * k).round() as i32).max(1), ((t.h as f64 * k).round() as i32).max(1));
+    let d = Rect::new(ic.x + (ic.w - w) / 2, ic.y1() - h, w, h);
+    cv.fill(clip, d.inflate(1), argb(90, 0, 0, 0));
+    cv.blit(clip, d, &t.px, t.w, Rect::new(0, 0, t.w as i32, t.h as i32), true, 255);
+    if t.video {
+        let s = (ic.w / 4).clamp(12, 28);
+        let b = Rect::new(d.x + (d.w - s) / 2, d.y + (d.h - s) / 2, s, s);
+        cv.rrect(clip, b, s / 2, argb(150, 0, 0, 0));
+        // A triangle pointing right, row by row.
+        let (tx, th) = (b.x + s * 2 / 5, s / 2);
+        for i in 0..th {
+            let half = (th / 2 - (i - th / 2).abs()).max(0);
+            cv.fill(clip, Rect::new(tx, b.y + s / 4 + i, half * 2 * 7 / 8 + 1, 1), argb(235, 255, 255, 255));
         }
     }
 }
