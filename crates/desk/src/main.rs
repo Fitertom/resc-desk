@@ -1,6 +1,7 @@
 //! resc-desk: a Wayland compositor + desktop shell written from scratch in Rust.
 mod anim;
 mod prof;
+mod media;
 mod mousebind;
 mod livewall;
 mod toast;

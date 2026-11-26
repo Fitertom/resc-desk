@@ -1048,7 +1048,13 @@ fn shortcut(d: &mut Desk, code: u32) -> bool {
             crate::osd::show(d);
             return true;
         }
-        _ => {}
+        // Play/pause, next, previous, stop, rewind: the player's, wherever focus is (MPRIS).
+        c => {
+            if let Some(cmd) = crate::media::of_key(c) {
+                crate::media::send(cmd);
+                return true;
+            }
+        }
     }
     // Win+Tab: task view (the desktops live there). In nested mode Ctrl+Alt+Tab too.
     if code == key::TAB && h & M_SUPER != 0 {

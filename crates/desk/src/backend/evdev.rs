@@ -40,7 +40,9 @@ const ABS_Y: u16 = 1;
 const LETTERS: [std::ops::RangeInclusive<usize>; 3] = [16..=25, 30..=38, 44..=50];
 /// Mute, volume down, volume up: a keyboard's media interface (a volume knob) is a keyboard
 /// of its own to the kernel, without letters.
-const MEDIA_KEYS: [usize; 3] = [113, 114, 115];
+/// Volume, mute, play/pause, next, previous, stop: a device with any of them is a keyboard
+/// of ours (a media keyboard's "consumer control", a knob).
+const MEDIA_KEYS: [usize; 7] = [113, 114, 115, 163, 164, 165, 166];
 const BTN_MISC: u16 = 0x100;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;

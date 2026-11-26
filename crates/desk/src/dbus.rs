@@ -345,6 +345,19 @@ impl Bus {
             .ok()
             .and_then(|a| a.split(';').find_map(|e| e.strip_prefix("unix:path=").map(|p| p.split(',').next().unwrap_or(p).to_string())))
             .unwrap_or_else(|| "/run/dbus/system_bus_socket".into());
+        Self::connect(&path)
+    }
+
+    /// The session bus ($DBUS_SESSION_BUS_ADDRESS, else $XDG_RUNTIME_DIR/bus).
+    pub fn session() -> std::io::Result<Bus> {
+        let path = std::env::var("DBUS_SESSION_BUS_ADDRESS")
+            .ok()
+            .and_then(|a| a.split(';').find_map(|e| e.strip_prefix("unix:path=").map(|p| p.split(',').next().unwrap_or(p).to_string())))
+            .unwrap_or_else(|| format!("{}/bus", std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{}", sys::uid()))));
+        Self::connect(&path)
+    }
+
+    fn connect(path: &str) -> std::io::Result<Bus> {
         let mut s = UnixStream::connect(path)?;
         s.set_read_timeout(Some(Duration::from_millis(1500)))?;
         s.set_write_timeout(Some(Duration::from_millis(1500)))?;

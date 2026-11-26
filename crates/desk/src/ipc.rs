@@ -295,6 +295,19 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             let act = crate::mousebind::Act::parse(&rest[2..].join(" "));
             crate::mousebind::set(d, &name, layer, act);
         }
+        // media playpause|next|prev|stop|seek SECONDS: the player's (MPRIS, media.rs).
+        "media" => {
+            use crate::media::Cmd;
+            let cmd = match arg(0)? {
+                "playpause" => Cmd::PlayPause,
+                "next" => Cmd::Next,
+                "prev" | "previous" => Cmd::Previous,
+                "stop" => Cmd::Stop,
+                "seek" => Cmd::Seek(arg(1)?.parse().map_err(|_| "bad seconds")?),
+                _ => return Err("media playpause|next|prev|stop|seek SECONDS".into()),
+            };
+            crate::media::send(cmd);
+        }
         // fullscreen: the focused window on or off fullscreen (tests).
         "fullscreen" => {
             if let Some(wk) = crate::wm::focused(d) {
