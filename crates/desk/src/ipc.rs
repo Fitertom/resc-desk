@@ -305,6 +305,18 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             d.damage_all();
             crate::layout::save_config(d).map_err(|e| e.to_string())?;
         }
+        // taskbar-autohide on|off: the taskbar hides until the pointer reaches the bottom edge
+        "taskbar-autohide" => {
+            d.display_cfg.taskbar_autohide = match arg(0)? {
+                "on" => true,
+                "off" => false,
+                _ => return Err("taskbar-autohide on|off".into()),
+            };
+            crate::shell::taskbar_poke(d);
+            crate::wm::outputs_changed(d);
+            d.damage_all();
+            crate::layout::save_config(d).map_err(|e| e.to_string())?;
+        }
         // taskbar all|main: on every monitor or the main one only
         "taskbar" => {
             d.display_cfg.taskbar_all = match arg(0)? {
@@ -393,6 +405,7 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             let main = d.outputs.get(crate::monitors::primary_index(d)).map(|o| o.name.clone());
             out.push_str(&format!("project {}\n", d.display_cfg.project.key()));
             out.push_str(&format!("taskbar {}\n", if d.display_cfg.taskbar_all { "all" } else { "main" }));
+            out.push_str(&format!("taskbar_autohide {}\n", if d.display_cfg.taskbar_autohide { "on" } else { "off" }));
             for m in b.monitors(d) {
                 out.push_str(&format!(
                     "mon {} {} {} {} {} {} {} {} {} {} {} {}\n",

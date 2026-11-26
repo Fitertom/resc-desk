@@ -328,7 +328,63 @@ pub fn taskbar_rect(d: &Desk, oi: usize) -> Rect {
         // None: an empty strip under the bottom edge (nothing hits or draws it).
         return Rect::new(r.x, r.y1(), r.w, 0);
     }
-    Rect::new(r.x, r.y1() - TASKBAR_H, r.w, TASKBAR_H)
+    // Slid down by how far away it is (autohide), past its glass shadow when all gone.
+    let away = d.overlay.tb_anim.get(oi).map_or(0.0, |a| a.away.value.clamp(0.0, 1.0));
+    let off = (away * (TASKBAR_H + GLASS_REACH) as f32).round() as i32;
+    Rect::new(r.x, r.y1() - TASKBAR_H + off, r.w, TASKBAR_H)
+}
+
+/// A window over the whole of output `oi` (a game in borderless «fullscreen», a fullscreen
+/// window): the taskbar stays away there, as Windows does.
+pub fn output_covered(d: &Desk, oi: usize) -> bool {
+    let Some(o) = d.outputs.get(oi) else { return false };
+    let or = o.rect();
+    for wk in wm::visible_stack(d).into_iter().rev() {
+        let w = &d.windows[wk];
+        if w.desktop() || w.minimized {
+            continue;
+        }
+        let g = d.surfaces.get(w.surf).map(|s| s.geom()).unwrap_or_default();
+        let r = Rect::new(w.x, w.y, g.w, g.h);
+        if !r.overlaps(&or) {
+            continue;
+        }
+        // The topmost window on this monitor decides.
+        // (Floating only: a maximized window that draws its own frame covers it too, and the
+        // taskbar must still come out over it.)
+        return w.fullscreen_output == Some(oi) || (!w.ssd && w.tile == crate::state::Tile::Floating && r.contains_rect(&or));
+    }
+    false
+}
+
+/// Should the taskbar of output `oi` be out now (autohide: the pointer at the bottom edge or
+/// on it, or something of it open)?
+fn taskbar_wanted(d: &Desk, oi: usize) -> bool {
+    if output_covered(d, oi) {
+        return false;
+    }
+    if !d.display_cfg.taskbar_autohide {
+        return true;
+    }
+    if d.overlay.start_menu == Some(oi) || d.tray.fly.as_ref().is_some_and(|(o, _)| *o == oi) || d.overlay.switcher.is_some() {
+        return true;
+    }
+    let (x, y) = (d.seat.x, d.seat.y);
+    let o = d.outputs[oi].rect();
+    if x < o.x as f64 || x >= o.x1() as f64 {
+        return false;
+    }
+    let tb = taskbar_rect(d, oi);
+    // At the very bottom edge (the pointer stops on its last row), or over the bar while out.
+    y >= (o.y1() - 2) as f64 || (y >= (tb.y - GLASS_REACH) as f64 && y < o.y1() as f64 && tb.y < o.y1())
+}
+
+/// The pointer moved or a setting changed: the taskbars' hiding may need to move.
+pub fn taskbar_poke(d: &mut Desk) {
+    if !d.overlay.animating {
+        d.overlay.anim_ms = d.now_ms();
+    }
+    d.overlay.animating = true;
 }
 
 /// Centre and right islands of output `oi`.
@@ -1192,6 +1248,10 @@ impl Spring {
 pub struct TbAnim {
     pub focus: Spring,
     pub lens: Lens,
+    /// 0 shown .. 1 slid away below the screen (autohide, a game over the whole monitor).
+    pub away: crate::anim::Spring,
+    /// When the pointer last wanted it (ms): it goes a moment after.
+    pub wanted_ms: u32,
 }
 
 /// The glass drop under the hovered taskbar button: Liquify's `Drop` in pixels. Its edges
@@ -1297,6 +1357,40 @@ pub fn tick(d: &mut Desk) -> bool {
             let [c, _] = islands(d, oi);
             d.damage(c);
             moving = true;
+        }
+    }
+    // Autohide: each taskbar slides toward where it should be; it goes 0.6 s after it was
+    // last wanted.
+    let now_ms = d.now_ms();
+    for oi in 0..d.outputs.len() {
+        if !has_taskbar(d, oi) {
+            continue;
+        }
+        let want = taskbar_wanted(d, oi);
+        let covered = output_covered(d, oi);
+        let before = taskbar_rect(d, oi);
+        let a = &mut d.overlay.tb_anim[oi];
+        if want {
+            a.wanted_ms = now_ms;
+        }
+        let away = !want && (covered || now_ms.wrapping_sub(a.wanted_ms) > 600);
+        a.away.response = 0.28;
+        a.away.damping = 1.0;
+        if covered && a.away.target != 1.0 {
+            // Under a game: gone at once, no slide over it.
+            a.away.snap(1.0);
+        } else {
+            a.away.to(if away { 1.0 } else { 0.0 });
+        }
+        let m = a.away.step(dt as f32);
+        let waiting = !want && !away && a.away.target == 0.0 && d.display_cfg.taskbar_autohide;
+        if m || waiting {
+            moving = true;
+        }
+        if m {
+            let after = taskbar_rect(d, oi);
+            let r = before.union(&after);
+            d.damage(Rect::new(r.x, r.y - GLASS_REACH, r.w, r.h + 2 * GLASS_REACH));
         }
     }
     moving |= peek_tick(d, dt as f32);

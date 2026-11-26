@@ -529,7 +529,7 @@ fn build_scene_m(d: &Desk, oi: usize, morphs: bool) -> Vec<Item> {
         }
     }
     // The taskbar hides under a fullscreen window on this output.
-    let tb_hidden = fullscreen_top.map_or(false, |k| d.windows[k].fullscreen_output == Some(oi)) || !shell::has_taskbar(d, oi);
+    let tb_hidden = fullscreen_top.map_or(false, |k| d.windows[k].fullscreen_output == Some(oi)) || !shell::has_taskbar(d, oi) || d.overlay.tb_anim.get(oi).is_some_and(|a| a.away.value >= 0.999) || shell::output_covered(d, oi);
     if !tb_hidden {
         // The islands' glass shadow reaches above the strip: the item covers it too, or the
         // CPU path would cut the shadow off at the strip's top edge.

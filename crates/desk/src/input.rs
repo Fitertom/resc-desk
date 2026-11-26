@@ -241,6 +241,8 @@ pub fn pointer_motion(d: &mut Desk, x: f64, y: f64, time: u32) {
         Grab::None => hover(d, time),
     }
     shell::pointer_hover(d);
+    // (Autohide, and a game over a monitor gone: the taskbar may have to move.)
+    shell::taskbar_poke(d);
 }
 
 fn clamp_to_layout(d: &Desk, x: f64, y: f64) -> (f64, f64) {

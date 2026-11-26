@@ -41,6 +41,8 @@ pub struct DisplayConfig {
     pub project: crate::monitors::Project,
     /// The taskbar on every monitor (true) or on the main one only.
     pub taskbar_all: bool,
+    /// The taskbar slides away and comes back at the screen's bottom edge (Windows' «Автоматически скрывать»).
+    pub taskbar_autohide: bool,
 }
 
 /// Calibration mode state (Параметры → Мониторы → Калибровка).
@@ -72,6 +74,7 @@ pub fn load_config() -> DisplayConfig {
         primary: None,
         project: Default::default(),
         taskbar_all: true,
+        taskbar_autohide: false,
     };
     let Ok(text) = std::fs::read_to_string(config_path()) else { return c };
     for line in text.lines() {
@@ -93,6 +96,7 @@ pub fn load_config() -> DisplayConfig {
             }
             ["primary", name] => c.primary = Some(name.to_string()),
             ["taskbar", v] => c.taskbar_all = *v != "main",
+            ["taskbar_autohide", v] => c.taskbar_autohide = *v == "on",
             ["project", p] => c.project = crate::monitors::Project::from_key(p).unwrap_or_default(),
             ["glass_blur", v] => c.glass_blur = v.parse().unwrap_or(crate::glass::FROST).clamp(0.0, crate::glass::MAX_BLUR),
             // A glass place's dim, blur and edge (look.rs).
@@ -139,6 +143,7 @@ pub fn save_config(d: &Desk) -> std::io::Result<String> {
     }
     s.push_str(&format!("project {}\n", d.display_cfg.project.key()));
     s.push_str(&format!("taskbar {}\n", if d.display_cfg.taskbar_all { "all" } else { "main" }));
+    s.push_str(&format!("taskbar_autohide {}\n", if d.display_cfg.taskbar_autohide { "on" } else { "off" }));
     let mut mons: Vec<_> = d.display_cfg.mons.iter().collect();
     mons.sort_by(|a, b| a.0.cmp(b.0));
     for (n, c) in mons {
@@ -183,6 +188,7 @@ pub fn initial_plane(d: &Desk, name: &str, pw: i32, ph: i32, mm: Option<(f64, f6
 pub fn relayout(d: &mut Desk) {
     let main = crate::monitors::primary_index(d);
     let Some(p0) = d.outputs.get(main).map(|o| (o.plane, o.pw)) else { return };
+    let main_was = (d.outputs[main].x, d.outputs[main].y);
     let (plane0, pw0) = p0;
     // Glue: shift every monitor left by the horizontal gaps before it.
     let shifts = glue_shifts(&d.outputs.iter().map(|o| o.plane).collect::<Vec<_>>(), d.display_cfg.glue);
@@ -215,6 +221,37 @@ pub fn relayout(d: &mut Desk) {
                 }
             }
         }
+    }
+    // The layout's top-left at (0, 0): X programs' screen starts there (Xwayland's root
+    // window has no negative side), so a monitor left of or above the main one would be
+    // off it: the X pointer stops at the main monitor's edge, games clamp there.
+    let (minx, miny) = (d.outputs.iter().map(|o| o.x).min().unwrap_or(0), d.outputs.iter().map(|o| o.y).min().unwrap_or(0));
+    if minx != 0 || miny != 0 {
+        for (i, o) in d.outputs.iter_mut().enumerate() {
+            o.x -= minx;
+            o.y -= miny;
+            if !changed.contains(&i) {
+                changed.push(i);
+            }
+        }
+        d.mm_origin.0 += minx as f64 / k;
+        d.mm_origin.1 += miny as f64 / k;
+    }
+    // The whole layout moved (it does when a monitor left of or above the main one comes
+    // or goes): windows and the pointer go along, staying where they were on their monitors.
+    let (dx, dy) = (d.outputs[main].x - main_was.0, d.outputs[main].y - main_was.1);
+    if (dx, dy) != (0, 0) {
+        let keys = d.windows.keys();
+        for wk in keys {
+            let w = &mut d.windows[wk];
+            w.x += dx;
+            w.y += dy;
+            if !w.restore.is_empty() {
+                w.restore = w.restore.translate(dx, dy);
+            }
+        }
+        d.seat.x += dx as f64;
+        d.seat.y += dy as f64;
     }
     d.wall.invalidate();
     if changed.is_empty() {

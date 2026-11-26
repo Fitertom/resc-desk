@@ -47,7 +47,7 @@ pub fn create_window(d: &mut Desk, ck: CKey, sk: SKey, toplevel: ObjId) {
 pub fn workarea(d: &Desk, oi: usize) -> Rect {
     let Some(o) = d.outputs.get(oi) else { return Rect::new(0, 0, 800, 600) };
     let r = o.rect();
-    if !shell::has_taskbar(d, oi) {
+    if !shell::has_taskbar(d, oi) || d.display_cfg.taskbar_autohide {
         return r;
     }
     Rect::new(r.x, r.y, r.w, r.h - shell::TASKBAR_H)

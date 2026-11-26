@@ -88,6 +88,7 @@ enum Sw {
     Hdr,
     /// The taskbar on every monitor.
     TbAll,
+    TbAuto,
     /// The Bluetooth adapter's power.
     BtPower,
 }
@@ -228,6 +229,7 @@ struct Model {
     /// Win+P's way (monitors::PROJECTS).
     project: usize,
     taskbar_all: bool,
+    taskbar_autohide: bool,
     error: Option<String>,
 }
 
@@ -271,6 +273,7 @@ fn fetch() -> Model {
             "session" => m.session = v.to_string(),
             "project" => m.project = crate::monitors::PROJECTS.iter().position(|p| p.key() == v).unwrap_or(2),
             "taskbar" => m.taskbar_all = v != "main",
+            "taskbar_autohide" => m.taskbar_autohide = v == "on",
             "mon" if n.len() >= 12 => m.mons.push(Mon {
                 name: n[0].to_string(),
                 on: n[1] == "1",
@@ -840,7 +843,7 @@ impl App {
         self.anims.drive(AK::Switch(Sw::Frost), on(self.m.frosted), SPR_SWITCH);
         self.anims.drive(AK::Switch(Sw::Glue), on(self.m.glue), SPR_SWITCH);
         let mon = self.sel_mon().cloned().unwrap_or_default();
-        for (sw, v) in [(Sw::Primary, mon.primary), (Sw::MonOn, mon.on), (Sw::Vrr, mon.vrr), (Sw::Hdr, mon.hdr), (Sw::TbAll, self.m.taskbar_all)] {
+        for (sw, v) in [(Sw::Primary, mon.primary), (Sw::MonOn, mon.on), (Sw::Vrr, mon.vrr), (Sw::Hdr, mon.hdr), (Sw::TbAll, self.m.taskbar_all), (Sw::TbAuto, self.m.taskbar_autohide)] {
             self.anims.drive(AK::Switch(sw), on(v), SPR_SWITCH);
         }
         let bt_on = self.bt.as_ref().map_or(false, |b| b.state.powered);
@@ -997,6 +1000,12 @@ impl App {
                     String::new(),
                     "Перетащите мониторы так, как они стоят на столе; края прилипают друг к другу. Точно, по линейке — в «Калибровке» ниже".into(),
                     Ctl::Plane,
+                ));
+                v.push((
+                    "Автоматически скрывать панель задач".into(),
+                    String::new(),
+                    "Панель уезжает вниз и появляется, когда курсор доходит до нижнего края экрана; развёрнутые окна занимают экран целиком. Над игрой на весь экран панели нет и без этого".into(),
+                    Ctl::Switch(Sw::TbAuto),
                 ));
                 if m.mons.len() > 1 {
                     v.push(("Несколько мониторов".into(), String::new(), "То же, что Win+P".into(), Ctl::Choice(Ch::Project)));
@@ -1371,6 +1380,11 @@ impl App {
                         send(&format!("anim {} {i}", if ch == Ch::Launch { "launch" } else { "close" }));
                     }
                 }
+            }
+            Ctl::Switch(Sw::TbAuto) => {
+                self.m.taskbar_autohide = !self.m.taskbar_autohide;
+                send(&format!("taskbar-autohide {}", if self.m.taskbar_autohide { "on" } else { "off" }));
+                self.refresh();
             }
             Ctl::Switch(Sw::TbAll) => {
                 self.m.taskbar_all = !self.m.taskbar_all;
