@@ -253,31 +253,17 @@ impl<'a> Canvas<'a> {
             self.fill(clip, r, color);
             return;
         }
+        // The continuous corner's curve starts up to 1.6 radii from the corner.
+        let zone = rad * 1.6 + 1.0;
         for y in c.y..c.y1() {
             let py = y as f32 + 0.5;
             let drow = y as usize * self.stride;
-            let cy = if py < r.y as f32 + rad {
-                Some(r.y as f32 + rad)
-            } else if py > r.y1() as f32 - rad {
-                Some(r.y1() as f32 - rad)
-            } else {
-                None
-            };
+            let in_y = py < r.y as f32 + zone || py > r.y1() as f32 - zone;
             for x in c.x..c.x1() {
                 let px = x as f32 + 0.5;
                 let mut cov = 1.0f32;
-                if let Some(cy) = cy {
-                    let cx = if px < r.x as f32 + rad {
-                        Some(r.x as f32 + rad)
-                    } else if px > r.x1() as f32 - rad {
-                        Some(r.x1() as f32 - rad)
-                    } else {
-                        None
-                    };
-                    if let Some(cx) = cx {
-                        let dist = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
-                        cov = (rad - dist + 0.5).clamp(0.0, 1.0);
-                    }
+                if in_y && (px < r.x as f32 + zone || px > r.x1() as f32 - zone) {
+                    cov = (0.5 - rrect_sdf(px, py, r, rad)).clamp(0.0, 1.0);
                 }
                 if cov <= 0.0 {
                     continue;
@@ -393,13 +379,13 @@ impl<'a> Canvas<'a> {
 }
 
 /// Signed distance from a point to a rounded rect (negative inside).
+/// Signed distance to `r` rounded by `rad`, with the continuous (squircle) corners the
+/// glass has (glass.rs `sd_squircle`, liquify's squircle.glsl): frames, outlines and the
+/// glass under them meet exactly.
 pub fn rrect_sdf(px: f32, py: f32, r: Rect, rad: f32) -> f32 {
     let (hw, hh) = (r.w as f32 / 2.0, r.h as f32 / 2.0);
     let (cx, cy) = (r.x as f32 + hw, r.y as f32 + hh);
-    let qx = (px - cx).abs() - (hw - rad);
-    let qy = (py - cy).abs() - (hh - rad);
-    let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
-    outside + qx.max(qy).min(0.0) - rad
+    crate::glass::sd_squircle((px - cx, py - cy), (hw, hh), rad)
 }
 
 // ------------------------------------------------------------------ scene

@@ -49,7 +49,7 @@ pub fn draw_background(d: &Desk, oi: usize, _xf: Xf, cv: &mut Canvas, clip: Rect
 
 /// Corner radius of floating windows with our frame (maximized, snapped and fullscreen
 /// ones are square, as in Windows 11).
-pub const RADIUS: i32 = 10;
+pub const RADIUS: i32 = 12;
 
 pub fn window_radius(d: &Desk, wk: WKey) -> i32 {
     let w = &d.windows[wk];

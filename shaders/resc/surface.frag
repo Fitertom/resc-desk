@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "squircle.glsl"
 // Premultiplied output (blend ONE, ONE_MINUS_SRC_ALPHA). A window's surfaces are clipped to
 // its rounded corners (radius > 0). XRGB textures read alpha 1 through
 // their image view's swizzle. 1:1 rects land on texel centres: the copy is exact; scaled ones
@@ -29,8 +31,8 @@ void main() {
         vec2 hb = pc.clip.zw * 0.5;
         vec2 mid = pc.clip.xy + hb;
         float r = min(gl_FragCoord.y < mid.y ? pc.radius : pc.radiusB, min(hb.x, hb.y));
-        vec2 q = abs(gl_FragCoord.xy - mid) - hb + r;
-        float sd = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+        // The continuous corners of the glass under it (liquify/squircle.glsl).
+        float sd = sdSquircle(gl_FragCoord.xy - mid, hb, r);
         c *= clamp(0.5 - sd, 0.0, 1.0);
     }
     outColor = c * pc.alpha;
