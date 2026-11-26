@@ -263,6 +263,22 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             let _ = crate::layout::save_config(d);
             out.push_str(match &d.live { Some(l) if l.on_picture => "livewall: picture\n", Some(_) => "livewall: on\n", None => "livewall: off\n" });
         }
+        // launch-desktop X Y W H ICON NAME,NAME… -- CMD: a program started from an icon on the
+        // desktop (X Y W H: the icon in the desktop window), growing out of it.
+        "launch-desktop" => {
+            let n = |i: usize| -> Result<i32, String> { arg(i)?.parse().map_err(|_| "bad rect".to_string()) };
+            let r = crate::geom::Rect::new(n(0)?, n(1)?, n(2)?, n(3)?);
+            let icon = arg(4)?.to_string();
+            let names: Vec<String> = arg(5)?.split(',').map(str::to_string).collect();
+            let sep = rest.iter().position(|a| *a == "--").ok_or("no --")?;
+            let cmd = rest[sep + 1..].join(" ");
+            let desk = d.windows.iter().find(|(_, w)| w.desktop()).map(|(_, w)| (w.x, w.y));
+            let nm: Vec<&str> = names.iter().map(String::as_str).collect();
+            match desk {
+                Some((x, y)) => crate::life::launch_from(d, &cmd, &icon, &nm, r.translate(x, y)),
+                None => crate::life::launch(d, &cmd, &icon, &nm, None),
+            }
+        }
         // fullscreen: the focused window on or off fullscreen (tests).
         "fullscreen" => {
             if let Some(wk) = crate::wm::focused(d) {

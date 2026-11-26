@@ -237,6 +237,27 @@ pub fn dry() -> bool {
     DRY.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// `cmd` started from an icon of the desktop (`rect` in its window): the compositor runs it
+/// and grows its window out of the icon; else as `spawn`.
+pub fn launch_from_desktop(cmd: &str, cwd: Option<&Path>, rect: crate::geom::Rect, icon: &str, names: &[String]) {
+    if dry() {
+        DRY_LOG.lock().unwrap().push(format!("launch {cmd}"));
+        return;
+    }
+    let full = match cwd {
+        Some(d) => format!("cd {} && {cmd}", quote(&d.to_string_lossy())),
+        None => cmd.to_string(),
+    };
+    let icon = if icon.is_empty() { "-" } else { icon };
+    let names: Vec<&str> = names.iter().map(String::as_str).filter(|n| !n.is_empty() && !n.contains([' ', ','])).collect();
+    let names = if names.is_empty() { "-".to_string() } else { names.join(",") };
+    let req = format!("launch-desktop {} {} {} {} {} {} -- {full}", rect.x, rect.y, rect.w, rect.h, icon.replace(' ', "_"), names);
+    if crate::ipc::request(&req).is_ok() {
+        return;
+    }
+    spawn(cmd, cwd);
+}
+
 pub fn spawn(cmd: &str, cwd: Option<&Path>) {
     if dry() {
         DRY_LOG.lock().unwrap().push(format!("spawn {cmd}"));

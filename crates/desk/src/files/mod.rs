@@ -1739,7 +1739,15 @@ impl App {
         }
         if it.e.ext == "desktop" {
             if let Some(h) = std::fs::read_to_string(&p).ok().and_then(|t| open::parse(&t, "")) {
-                open::spawn(&open::command(&h, &[]), None);
+                let cmd = open::command(&h, &[]);
+                match self.desk_icon_rect(&p) {
+                    Some(r) => {
+                        let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                        let bin = cmd.split_whitespace().find(|w| !w.contains('=')).unwrap_or("").rsplit('/').next().unwrap_or("").to_string();
+                        open::launch_from_desktop(&cmd, None, r, &h.icon, &[h.icon.clone(), stem, bin]);
+                    }
+                    None => open::spawn(&cmd, None),
+                }
             }
             return;
         }
@@ -1775,7 +1783,17 @@ impl App {
         let mime = it.mime;
         let h = self.apps().default_for(mime).cloned();
         match h {
-            Some(h) => open::spawn(&open::command(&h, &[p.clone()]), p.parent()),
+            Some(h) => {
+                let cmd = open::command(&h, &[p.clone()]);
+                match self.desk_icon_rect(&p) {
+                    Some(r) => {
+                        let bin = cmd.split_whitespace().find(|w| !w.contains('=')).unwrap_or("").rsplit('/').next().unwrap_or("").to_string();
+                        let id = h.id.trim_end_matches(".desktop").to_string();
+                        open::launch_from_desktop(&cmd, p.parent(), r, &h.icon, &[h.icon.clone(), id, bin]);
+                    }
+                    None => open::spawn(&cmd, p.parent()),
+                }
+            }
             None => {
                 let name = it.kind.clone();
                 self.toast(&format!("Нет программы, которая открывает файлы типа «{name}»"));

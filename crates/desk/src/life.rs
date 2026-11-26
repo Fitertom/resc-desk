@@ -224,6 +224,16 @@ fn start_clock(d: &mut Desk) {
 /// Starts `cmd`, a program whose icon is `icon` and whose windows may be called one of
 /// `names`, clicked at `origin` (its icon there, logical).
 pub fn launch(d: &mut Desk, cmd: &str, icon: &str, names: &[&str], origin: Option<Rect>) {
+    launch_ex(d, cmd, icon, names, origin, false);
+}
+
+/// Started from an icon on the desktop: its window grows out of that icon whatever the
+/// launch animation chosen (the taskbar's way, but from there).
+pub fn launch_from(d: &mut Desk, cmd: &str, icon: &str, names: &[&str], origin: Rect) {
+    launch_ex(d, cmd, icon, names, Some(origin), true);
+}
+
+fn launch_ex(d: &mut Desk, cmd: &str, icon: &str, names: &[&str], origin: Option<Rect>, force: bool) {
     let mut names: Vec<String> = names.iter().filter(|n| !n.is_empty()).map(|n| n.to_lowercase()).collect();
     names.dedup();
     // Clicked again while it is still loading: once is enough (a second Steam would only
@@ -247,7 +257,7 @@ pub fn launch(d: &mut Desk, cmd: &str, icon: &str, names: &[&str], origin: Optio
     if d.outputs.is_empty() {
         return;
     }
-    let origin = origin.filter(|_| d.display_cfg.anim_launch == 1 && d.gpu.is_some());
+    let origin = origin.filter(|_| (force || d.display_cfg.anim_launch == 1) && d.gpu.is_some());
     let l = &mut d.overlay.life;
     l.next += 1;
     let id = l.next;

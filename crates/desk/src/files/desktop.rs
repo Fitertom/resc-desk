@@ -71,6 +71,19 @@ fn nearest_free(want: (i32, i32), cols: i32, rows: i32, taken: &std::collections
 }
 
 impl App {
+    /// On the desktop: where the icon of `p` is (window coordinates), for a launch to grow
+    /// out of.
+    pub fn desk_icon_rect(&self, p: &std::path::Path) -> Option<Rect> {
+        if !self.desk {
+            return None;
+        }
+        let i = self.items.iter().position(|x| x.e.path == p)?;
+        let r = *self.rects.get(i)?;
+        let vr = self.view_rect();
+        let s = self.icon_size();
+        Some(Rect::new(vr.x + r.x + (r.w - s) / 2, vr.y + r.y + 8, s, s))
+    }
+
     fn icon_size(&self) -> i32 {
         match self.view.mode {
             Mode::Icons(s) => s,
