@@ -529,7 +529,7 @@ fn build_scene_m(d: &Desk, oi: usize, morphs: bool) -> Vec<Item> {
         }
     }
     // The taskbar hides under a fullscreen window on this output.
-    let tb_hidden = fullscreen_top.map_or(false, |k| d.windows[k].fullscreen_output == Some(oi)) || !shell::has_taskbar(d, oi) || d.overlay.tb_anim.get(oi).is_some_and(|a| a.away.value >= 0.999) || (shell::output_covered(d, oi) && !shell::taskbar_wanted(d, oi));
+    let tb_hidden = fullscreen_top.map_or(false, |k| d.windows[k].fullscreen_output == Some(oi) && !shell::taskbar_wanted(d, oi)) || !shell::has_taskbar(d, oi) || d.overlay.tb_anim.get(oi).is_some_and(|a| a.away.value >= 0.999) || (shell::output_covered(d, oi) && !shell::taskbar_wanted(d, oi));
     if !tb_hidden {
         // The islands' glass shadow reaches above the strip: the item covers it too, or the
         // CPU path would cut the shadow off at the strip's top edge.
@@ -947,7 +947,25 @@ fn pointer_rect(d: &Desk) -> Rect {
         }
         return Rect::default();
     }
+    // The theme's cursor at the scale of the output it is on.
+    let s = d.output_at(d.seat.x, d.seat.y).and_then(|o| d.outputs.get(o)).map_or(1.0, |o| o.scale);
+    if let Some((img, k)) = theme_cursor(d.seat.cursor_shape, s) {
+        let (w, h) = ((img.w as f64 * k / s).ceil() as i32, (img.h as f64 * k / s).ceil() as i32);
+        let (hx, hy) = ((img.xhot as f64 * k / s).round() as i32, (img.yhot as f64 * k / s).round() as i32);
+        return Rect::new(x - hx, y - hy, w + 1, h + 1);
+    }
     shell::cursor_shape_rect(d.seat.cursor_shape, x, y)
+}
+
+/// The theme's image for `shape` on an output at `scale`, and how much to scale it (its
+/// physical pixels per image pixel).
+fn theme_cursor(shape: u32, scale: f64) -> Option<(std::rc::Rc<crate::xcursor::Image>, f64)> {
+    let want = (crate::xcursor::base_size() as f64 * scale).round() as i32;
+    let img = crate::xcursor::get(shape, want).or_else(|| crate::xcursor::get(1, want))?;
+    // A theme's images come in steps (24, 32, 48…): the nearest drawn at the size wanted.
+    let nominal = img.w.max(img.h).max(1) as f64;
+    let k = if (nominal - want as f64).abs() <= want as f64 * 0.2 { 1.0 } else { want as f64 / nominal };
+    Some((img, k))
 }
 
 fn draw_cursor(d: &Desk, xf: Xf, cv: &mut Canvas, clip: Rect) {
@@ -960,6 +978,17 @@ fn draw_cursor(d: &Desk, xf: Xf, cv: &mut Canvas, clip: Rect) {
         return;
     }
     let (x, y) = (d.seat.x as i32, d.seat.y as i32);
+    if let Some((img, k)) = theme_cursor(d.seat.cursor_shape, xf.scale) {
+        let (px, py) = (xf.fx(d.seat.x) as f64, xf.fy(d.seat.y) as f64);
+        let dst = Rect::new(
+            (px - img.xhot as f64 * k).round() as i32,
+            (py - img.yhot as f64 * k).round() as i32,
+            (img.w as f64 * k).round() as i32,
+            (img.h as f64 * k).round() as i32,
+        );
+        cv.blit(clip, dst, &img.px, img.w as usize, Rect::new(0, 0, img.w, img.h), false, 255);
+        return;
+    }
     if shell::draw_cursor_shape(d.seat.cursor_shape, x, y, xf, cv, clip) {
         return;
     }

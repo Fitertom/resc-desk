@@ -447,10 +447,10 @@ pub fn taskbar_contains(d: &Desk, x: f64, y: f64) -> bool {
         || (crate::taskview::is_open(d) && d.output_at(x, y) == d.overlay.taskview.as_ref().map(|t| t.oi))
 }
 
-/// No taskbar on output `oi` now: a fullscreen window covers it, or the taskbar is on the
-/// main monitor only.
+/// No taskbar on output `oi` now: a fullscreen window covers it (unless Win brought it out
+/// over it), or the taskbar is on the main monitor only.
 fn fullscreen_on(d: &Desk, oi: usize) -> bool {
-    !has_taskbar(d, oi) || wm::visible_stack(d).iter().any(|k| d.windows[*k].tile == Tile::Fullscreen && d.windows[*k].fullscreen_output == Some(oi))
+    !has_taskbar(d, oi) || (wm::visible_stack(d).iter().any(|k| d.windows[*k].tile == Tile::Fullscreen && d.windows[*k].fullscreen_output == Some(oi)) && !taskbar_wanted(d, oi))
 }
 
 /// Output `oi` has a taskbar (Параметры → Мониторы: on every monitor, or the main one only).

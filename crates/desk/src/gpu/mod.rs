@@ -1767,7 +1767,11 @@ impl Gpu {
             let n = (w * h) as usize;
             let mk = |b: &Buffer| Canvas { px: unsafe { std::slice::from_raw_parts_mut(b.ptr as *mut u32, n) }, w, h, stride: w as usize };
             let mut layers = [mk(&out.layers[0].1), mk(&out.layers[1].1)];
+            let t = std::time::Instant::now();
             crate::render::render_layers(d, oi, &mut layers, &ldmg);
+            if crate::prof::on() {
+                crate::prof::since(&format!("{} cpu layers", d.outputs[oi].name), t);
+            }
         }
         self.outs[k].ext = ext_now;
         // A fresh image is UNDEFINED everywhere: all of it goes up (the buffer is zero
@@ -1850,8 +1854,12 @@ impl Gpu {
                 signal_count: 0,
                 signal_sems: std::ptr::null(),
             };
+            let t = std::time::Instant::now();
             check((self.f.vkQueueSubmit)(self.queue, 1, &si, self.fence), "vkQueueSubmit")?;
             check((self.f.vkWaitForFences)(self.dev, 1, &self.fence, 1, 5_000_000_000), "vkWaitForFences")?;
+            if crate::prof::on() {
+                crate::prof::since(&format!("{} gpu wait", d.outputs[oi].name), t);
+            }
             (self.f.vkResetFences)(self.dev, 1, &self.fence);
         }
         self.outs[k].fresh = false;
@@ -1869,6 +1877,7 @@ impl Gpu {
         }
 
         // The frame back into the backend's buffer.
+        let t_rb = std::time::Instant::now();
         let rb = unsafe { std::slice::from_raw_parts(self.outs[k].readback.ptr as *const u32, (w * h) as usize) };
         for r in &rects {
             for y in r.y..r.y1() {
@@ -1876,6 +1885,12 @@ impl Gpu {
                 let t = y as usize * cv.stride;
                 cv.px[t + r.x as usize..t + r.x1() as usize].copy_from_slice(&rb[o + r.x as usize..o + r.x1() as usize]);
             }
+        }
+        if crate::prof::on() {
+            let name = &d.outputs[oi].name;
+            crate::prof::since(&format!("{name} readback copy"), t_rb);
+            let px: i64 = rects.iter().map(|r| r.w as i64 * r.h as i64).sum();
+            crate::prof::add(&format!("{name} Mpx per frame"), px as f64 / 1e6);
         }
         Ok(rects)
     }

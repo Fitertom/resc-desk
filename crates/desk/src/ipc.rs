@@ -251,6 +251,12 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             out.push_str(&format!("glue {}
 ", if d.display_cfg.glue { "on" } else { "off" }));
         }
+        // profile on|off: frame stages timed; profile: the table since the last one.
+        "profile" => match rest.first().copied() {
+            Some("on") => crate::prof::set(true),
+            Some("off") => crate::prof::set(false),
+            _ => out.push_str(&crate::prof::report()),
+        },
         "slowmo" => {
             let k: f32 = arg(0)?.parse().map_err(|_| "slowmo RATE (1: normal)".to_string())?;
             d.overlay.slowmo = if k > 0.0 && k != 1.0 { k.clamp(0.02, 4.0) } else { 0.0 };

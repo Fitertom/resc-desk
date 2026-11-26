@@ -340,6 +340,8 @@ pub struct Monitor {
     pub vrr: bool,
     /// HDR: 10-bit buffers, PQ.
     pub deep: bool,
+    /// When a frame last went out (ctl profile's frame gap).
+    pub last_present: Option<std::time::Instant>,
     hdr_blob: u32,
     /// Flips asked for with older buffers are let go by (bumped whenever they change).
     gen: u32,
@@ -629,6 +631,7 @@ impl Drm {
             hdr_cap,
             vrr: false,
             deep: false,
+            last_present: None,
             hdr_blob: 0,
             gen: 0,
             out_id: 0,
@@ -757,6 +760,7 @@ impl Drm {
         let painted = crate::render::render_output(d, oi, &mut cv, &dmg);
         let back = if m.set { 1 - m.front } else { m.front };
         let (rot, deep) = (m.rot, m.deep);
+        let t_copy = std::time::Instant::now();
         for (i, b) in m.bufs.iter_mut().enumerate() {
             for r in &painted {
                 b.missed.add(*r);
@@ -768,6 +772,15 @@ impl Drm {
             for r in &rects.rects {
                 unsafe { monitors::copy_out(&m.shadow, ow, oh, *r, rot, b.map.ptr, b.pitch as usize, deep) };
             }
+        }
+        if crate::prof::on() {
+            let name = &d.outputs[oi].name;
+            crate::prof::since(&format!("{name} copy to monitor"), t_copy);
+            let now = std::time::Instant::now();
+            if let Some(t) = self.mons[mi].last_present {
+                crate::prof::add(&format!("{name} frame gap"), (now - t).as_secs_f64() * 1000.0);
+            }
+            self.mons[mi].last_present = Some(now);
         }
         d.outputs[oi].frames += 1;
         let shown = self.show(mi, back);

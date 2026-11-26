@@ -951,7 +951,11 @@ impl Xwm {
             }
         } else if ty == a.wm_change_state {
             if v[0] == 3 {
-                if let Some(k) = wk {
+                // A fullscreen game asks this itself when it loses focus (SDL does): it stays,
+                // as it would under a window opened over it. Minimized only while focused (its
+                // own button, a key in it).
+                let unfocused_fullscreen = wk.is_some_and(|k| d.windows.get(k).is_some_and(|w| w.tile == crate::state::Tile::Fullscreen) && crate::wm::focused(d) != Some(k));
+                if let Some(k) = wk.filter(|_| !unfocused_fullscreen) {
                     crate::wm::minimize(d, k);
                 }
             }

@@ -312,14 +312,15 @@ fn set_hover(d: &mut Desk, h: Option<(WKey, Hit)>) {
 /// wp_cursor_shape values for resize edges.
 fn edge_cursor(e: u32) -> u32 {
     match e {
-        1 => 18,  // n_resize
+        // cursor-shape-v1's numbers.
+        1 => 19,  // n_resize
         2 => 22,  // s_resize
-        4 => 24,  // w_resize
-        8 => 20,  // e_resize
-        5 => 25,  // nw_resize
-        9 => 19,  // ne_resize
-        6 => 23,  // sw_resize
-        10 => 21, // se_resize
+        4 => 25,  // w_resize
+        8 => 18,  // e_resize
+        5 => 21,  // nw_resize
+        9 => 20,  // ne_resize
+        6 => 24,  // sw_resize
+        10 => 23, // se_resize
         _ => 1,
     }
 }

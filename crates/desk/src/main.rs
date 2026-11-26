@@ -1,5 +1,7 @@
 //! resc-desk: a Wayland compositor + desktop shell written from scratch in Rust.
 mod anim;
+mod prof;
+mod xcursor;
 mod apps;
 mod backend;
 mod bt;
@@ -336,6 +338,7 @@ fn main() {
             eprintln!("epoll: {e}");
             break;
         }
+        let t_ev = std::time::Instant::now();
         for &(tok, ev) in evs.iter() {
             match tok & TOK_KIND_MASK {
                 0 => match tok {
@@ -370,7 +373,10 @@ fn main() {
                 _ => {}
             }
         }
+        prof::since("loop: events", t_ev);
+        let t_tick = std::time::Instant::now();
         d.overlay.animating = shell::tick(&mut d);
+        prof::since("loop: tick", t_tick);
         // X windows follow where they were moved, resized, focused (before drawing them).
         xwm::sync(&mut d);
         bench::step(&mut d);
@@ -379,7 +385,11 @@ fn main() {
             let o = &d.outputs[oi];
             if !o.frame_pending && (!o.damage.is_empty() || o.wants_frame) {
                 let t0 = sys::now_ns();
+                let tp = std::time::Instant::now();
                 be.present(&mut d, oi);
+                if prof::on() {
+                    prof::since(&format!("{} present", d.outputs[oi].name), tp);
+                }
                 if d.bench.run.is_some() {
                     bench::presented(&mut d, oi, t0);
                 }
