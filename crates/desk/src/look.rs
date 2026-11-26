@@ -66,6 +66,12 @@ impl Place {
     }
 }
 
+/// Programs that draw no frame of their own and are see-through on purpose (Liquify): the
+/// desk puts the glass of «Окна» under all of such a window, rounded like a framed one.
+pub fn glass_under(app_id: &str) -> bool {
+    matches!(app_id, "liquify")
+}
+
 /// One place's glass.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Glass {

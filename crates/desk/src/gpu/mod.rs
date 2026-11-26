@@ -361,7 +361,12 @@ fn window_glass(d: &Desk, wk: WKey, xf: Xf, before: usize) -> Option<GlassOp> {
         let r = crate::toast::RADIUS as f32 * s;
         return Some(GlassOp { rect: xf.r(f), radii: [r; 4], layer: 0, before, tint, bezel: g.bezel * s, panel: false, cover: [Rect::default(); 2], drop: None, sigma: g.blur * s, ..Default::default() });
     }
-    if !w.ssd || w.tile == crate::state::Tile::Fullscreen {
+    if w.tile == crate::state::Tile::Fullscreen {
+        return None;
+    }
+    // A frameless one only when it asks for the glass under all of it and is see-through.
+    let bare = !w.ssd;
+    if bare && !(crate::look::glass_under(&w.app_id) && d.surfaces.get(w.surf).is_some_and(|s| !s.is_opaque())) {
         return None;
     }
     let f = crate::wm::frame_rect(d, wk)?;

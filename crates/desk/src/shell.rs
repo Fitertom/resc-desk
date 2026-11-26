@@ -53,7 +53,7 @@ pub const RADIUS: i32 = 12;
 
 pub fn window_radius(d: &Desk, wk: WKey) -> i32 {
     let w = &d.windows[wk];
-    if w.ssd && w.tile == Tile::Floating { RADIUS } else { 0 }
+    if (w.ssd || crate::look::glass_under(&w.app_id)) && w.tile == Tile::Floating { RADIUS } else { 0 }
 }
 
 /// A soft shadow of the window's rounded shape, a little below it (stronger for the

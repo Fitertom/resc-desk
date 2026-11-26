@@ -499,7 +499,7 @@ fn build_scene_m(d: &Desk, oi: usize, morphs: bool) -> Vec<Item> {
         let w = &d.windows[wk];
         let Some(frame) = wm::frame_rect(d, wk) else { continue };
         if w.tile != Tile::Fullscreen {
-            if w.ssd && w.tile == Tile::Floating {
+            if (w.ssd || crate::look::glass_under(&w.app_id)) && w.tile == Tile::Floating {
                 items.push(Item::new(frame.inflate(shell::SHADOW), None, Elem::Shadow(wk)));
             }
             if w.ssd {
@@ -510,7 +510,9 @@ fn build_scene_m(d: &Desk, oi: usize, morphs: bool) -> Vec<Item> {
             }
         }
         let r = shell::window_radius(d, wk);
-        let round = (r > 0).then(|| (frame.inflate(-shell::BORDER), r - shell::BORDER));
+        // (Inside our frame's border; a frameless window is its frame.)
+        let inset = if w.ssd { shell::BORDER } else { 0 };
+        let round = (r > 0).then(|| (frame.inflate(-inset), r - inset));
         // The desktop's menus show over every window (below).
         push_tree_p(d, w.surf, &mut items, round, !w.desktop());
         for it in &mut items[first..] {
@@ -838,7 +840,7 @@ pub fn draw_frame(d: &Desk, wk: WKey, xf: Xf, cv: &mut Canvas) {
     let all = cv.bounds();
     cv.clear(all);
     let w = &d.windows[wk];
-    if w.ssd && w.tile == Tile::Floating {
+    if (w.ssd || crate::look::glass_under(&w.app_id)) && w.tile == Tile::Floating {
         shell::draw_shadow(d, wk, xf, cv, all);
     }
     if w.ssd {
@@ -851,7 +853,7 @@ pub fn draw_frame(d: &Desk, wk: WKey, xf: Xf, cv: &mut Canvas) {
 pub fn frame_extent(d: &Desk, wk: WKey) -> Option<Rect> {
     let w = d.windows.get(wk)?;
     let f = wm::frame_rect(d, wk)?;
-    Some(if w.ssd && w.tile == Tile::Floating { f.inflate(shell::SHADOW) } else { f })
+    Some(if (w.ssd || crate::look::glass_under(&w.app_id)) && w.tile == Tile::Floating { f.inflate(shell::SHADOW) } else { f })
 }
 
 /// Glass blurs its surroundings: any damage touching a glass panel grows to the
