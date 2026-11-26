@@ -50,17 +50,50 @@ enum Page {
     Displays,
     Sound,
     Bluetooth,
+    Mouse,
     About,
 }
 
-const PAGES: [(Page, &str, &str); 7] = [
+const PAGES: [(Page, &str, &str); 8] = [
     (Page::Look, "Оформление", "preferences-desktop-theme"),
     (Page::Glass, "Стекло", "preferences-desktop-effects;preferences-system-windows;preferences-desktop-theme"),
     (Page::Wallpaper, "Обои", "preferences-desktop-wallpaper;preferences-desktop-background"),
     (Page::Displays, "Мониторы", "preferences-desktop-display"),
     (Page::Sound, "Звук", "preferences-desktop-sound;audio-volume-high;multimedia-volume-control"),
     (Page::Bluetooth, "Bluetooth", "bluetooth;preferences-system-bluetooth;bluetooth-active;blueman"),
+    (Page::Mouse, "Мышь", "input-mouse;preferences-desktop-peripherals;input-mouse-symbolic"),
     (Page::About, "О системе", "computer;help-about"),
+];
+
+/// «Мышь»: the actions to pick for a button (label, mousebind.rs action).
+const MOUSE_ACTS: [(&str, &str); 27] = [
+    ("Как обычно", "default"),
+    ("Ничего", "none"),
+    ("G-Shift — зажать для второго слоя", "gshift"),
+    ("Копировать (Ctrl+C)", "key ctrl+c"),
+    ("Вставить (Ctrl+V)", "key ctrl+v"),
+    ("Вырезать (Ctrl+X)", "key ctrl+x"),
+    ("Отменить (Ctrl+Z)", "key ctrl+z"),
+    ("Повторить (Ctrl+Shift+Z)", "key ctrl+shift+z"),
+    ("Назад (Alt+←)", "key alt+left"),
+    ("Вперёд (Alt+→)", "key alt+right"),
+    ("Новая вкладка (Ctrl+T)", "key ctrl+t"),
+    ("Закрыть вкладку (Ctrl+W)", "key ctrl+w"),
+    ("Следующая вкладка (Ctrl+Tab)", "key ctrl+tab"),
+    ("Предыдущая вкладка (Ctrl+Shift+Tab)", "key ctrl+shift+tab"),
+    ("«Пуск» (Win)", "key super"),
+    ("Представление задач (Win+Tab)", "key super+tab"),
+    ("Переключить окно (Alt+Tab)", "key alt+tab"),
+    ("Закрыть окно (Alt+F4)", "key alt+f4"),
+    ("Снимок области (Win+Shift+S)", "key super+shift+s"),
+    ("Буфер обмена (Win+V)", "key super+v"),
+    ("Проводник (Win+E)", "key super+e"),
+    ("Пауза / воспроизведение", "key playpause"),
+    ("Следующий трек", "key nextsong"),
+    ("Предыдущий трек", "key previoussong"),
+    ("Громче", "key volumeup"),
+    ("Тише", "key volumedown"),
+    ("Без звука", "key mute"),
 ];
 
 /// Wallpaper tiles: size of a thumbnail.
@@ -125,9 +158,13 @@ enum Ch {
     Res,
     Hz,
     Rot,
+    /// «Мышь»: the button, its layer (as is, with G-Shift), its action.
+    MBtn,
+    MLayer,
+    MAct,
 }
 
-const ALL_CH: [Ch; 8] = [Ch::Launch, Ch::Close, Ch::Place, Ch::Project, Ch::Mon, Ch::Res, Ch::Hz, Ch::Rot];
+const ALL_CH: [Ch; 11] = [Ch::Launch, Ch::Close, Ch::Place, Ch::Project, Ch::Mon, Ch::Res, Ch::Hz, Ch::Rot, Ch::MBtn, Ch::MLayer, Ch::MAct];
 
 const ROTATIONS: [&str; 4] = ["Без поворота", "90° — портрет", "180° — вверх ногами", "270° — портрет, наоборот"];
 
@@ -235,6 +272,8 @@ struct Model {
     taskbar_all: bool,
     taskbar_autohide: bool,
     taskbar_keep_desktop: bool,
+    /// The mouse's bindings: button, layer, action (mousebind.rs).
+    mbinds: Vec<(String, u8, String)>,
     /// The live wallpaper: on, over the picture.
     live: bool,
     live_pic: bool,
@@ -283,6 +322,11 @@ fn fetch() -> Model {
             "taskbar" => m.taskbar_all = v != "main",
             "taskbar_autohide" => m.taskbar_autohide = v == "on",
             "taskbar_keep_desktop" => m.taskbar_keep_desktop = v == "on",
+            "mbind" if n.len() >= 3 => {
+                if let Ok(layer) = n[1].parse::<u8>() {
+                    m.mbinds.push((n[0].to_string(), layer, n[2..].join(" ")));
+                }
+            }
             "livewall" => {
                 m.live = v != "off";
                 m.live_pic = v == "picture";
@@ -410,9 +454,12 @@ struct App {
     /// The chosen output (0) and input (1) device, flowing between rows.
     devs: [Option<Drop>; 2],
     /// The chosen option of each `Ch`, flowing between rows.
-    chs: [Option<Drop>; 8],
+    chs: [Option<Drop>; 11],
     /// The glass place the «Стекло» page sets.
     place: usize,
+    /// «Мышь»: the button and the layer the action list sets.
+    mbtn: usize,
+    mlayer: usize,
     /// The update: its state, and the thread's answer to come.
     upd: Upd,
     upd_rx: Option<std::sync::mpsc::Receiver<Upd>>,
@@ -703,7 +750,24 @@ impl App {
             Ch::Res => mon.and_then(|m| self.sizes().iter().position(|s| *s == (m.w, m.h))).unwrap_or(0),
             Ch::Hz => mon.and_then(|m| self.rates().iter().position(|r| *r == m.mhz)).unwrap_or(0),
             Ch::Rot => mon.map_or(0, |m| (m.rot / 90) as usize),
+            Ch::MBtn => self.mbtn,
+            Ch::MLayer => self.mlayer,
+            Ch::MAct => {
+                let cur = self.mbind(self.mbtn, self.mlayer);
+                MOUSE_ACTS.iter().position(|(_, s)| *s == cur).unwrap_or(MOUSE_ACTS.len())
+            }
         }
+    }
+
+    /// What mouse button `b` does in `layer` («default» when nothing is set).
+    fn mbind(&self, b: usize, layer: usize) -> String {
+        let name = crate::mousebind::BUTTONS.get(b).map_or("", |x| x.0);
+        self.m.mbinds.iter().find(|(n, l, _)| n == name && *l as usize == layer).map_or("default".to_string(), |x| x.2.clone())
+    }
+
+    /// An action's label (the preset's, or the action as written).
+    fn mact_label(spec: &str) -> String {
+        MOUSE_ACTS.iter().find(|(_, s)| *s == spec).map_or_else(|| format!("Своё: {spec}"), |(l, _)| l.to_string())
     }
 
     /// The options of `ch`.
@@ -732,6 +796,30 @@ impl App {
             Ch::Res => self.sizes().iter().map(|(w, h)| format!("{w} × {h}")).collect(),
             Ch::Hz => self.rates().into_iter().map(hz_name).collect(),
             Ch::Rot => st(&ROTATIONS),
+            Ch::MBtn => crate::mousebind::BUTTONS
+                .iter()
+                .enumerate()
+                .map(|(i, (_, _, label))| {
+                    let (a, b) = (self.mbind(i, 0), self.mbind(i, 1));
+                    let mut s = label.to_string();
+                    if a != "default" {
+                        s.push_str(&format!("  ·  {}", Self::mact_label(&a)));
+                    }
+                    if b != "default" {
+                        s.push_str(&format!("  ·  G-Shift: {}", Self::mact_label(&b)));
+                    }
+                    s
+                })
+                .collect(),
+            Ch::MLayer => st(&["Обычно", "Пока зажата кнопка G-Shift"]),
+            Ch::MAct => {
+                let mut v: Vec<String> = MOUSE_ACTS.iter().map(|(l, _)| l.to_string()).collect();
+                let cur = self.mbind(self.mbtn, self.mlayer);
+                if !MOUSE_ACTS.iter().any(|(_, s)| *s == cur) {
+                    v.push(Self::mact_label(&cur));
+                }
+                v
+            }
         }
     }
 
@@ -1185,6 +1273,17 @@ impl App {
                     v.push(("Другие устройства".into(), String::new(), desc, Ctl::Bt(true)));
                 }
             }
+            Page::Mouse => {
+                v.push((
+                    "Кнопки мыши".into(),
+                    String::new(),
+                    "У каждой кнопки два назначения: обычное и пока зажата кнопка G-Shift (назначьте её любой кнопке). Сочетание клавиш держится, пока держится кнопка. Своё сочетание или команду можно вписать в ~/.config/resc-desk/mouse.conf: bind side 1 key ctrl+shift+t, bind extra 0 cmd firefox".into(),
+                    Ctl::None,
+                ));
+                v.push(("Кнопка".into(), String::new(), String::new(), Ctl::Choice(Ch::MBtn)));
+                v.push(("Когда".into(), String::new(), String::new(), Ctl::Choice(Ch::MLayer)));
+                v.push(("Что делает".into(), String::new(), String::new(), Ctl::Choice(Ch::MAct)));
+            }
             Page::About => {
                 v.push((
                     "resc-desk".into(),
@@ -1386,6 +1485,14 @@ impl App {
                         Ch::Launch => self.m.anim_launch = i,
                         Ch::Close => self.m.anim_close = i,
                         Ch::Place => self.place = i,
+                        Ch::MBtn => self.mbtn = i,
+                        Ch::MLayer => self.mlayer = i,
+                        Ch::MAct => {
+                            if let (Some((_, spec)), Some(b)) = (MOUSE_ACTS.get(i), crate::mousebind::BUTTONS.get(self.mbtn)) {
+                                send(&format!("mouse-bind {} {} {spec}", b.0, self.mlayer));
+                                self.refresh();
+                            }
+                        }
                         Ch::Project => {
                             self.m.project = i;
                             send(&format!("project {}", crate::monitors::PROJECTS[i].key()));
@@ -1598,6 +1705,7 @@ pub fn run(args: &[String]) -> i32 {
         Some("bluetooth") | Some("bt") => Page::Bluetooth,
         Some("wallpaper") | Some("wallpapers") => Page::Wallpaper,
         Some("glass") => Page::Glass,
+        Some("mouse") => Page::Mouse,
         _ => Page::Look,
     };
     crate::font::init();
@@ -1615,8 +1723,10 @@ pub fn run(args: &[String]) -> i32 {
         anims: Anims::default(),
         nav: Drop::at(PAGES.iter().position(|p| p.0 == page).unwrap_or(0) as f32),
         devs: [None, None],
-        chs: [None; 8],
+        chs: [None; 11],
         place: 0,
+        mbtn: 0,
+        mlayer: 0,
         mon: String::new(),
         pdrag: None,
         upd: Upd::Idle,

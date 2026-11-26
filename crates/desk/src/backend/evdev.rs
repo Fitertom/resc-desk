@@ -96,6 +96,8 @@ struct Dev {
     dy: i32,
     wheel: [i32; 2],
     wheel_hi: [i32; 2],
+    /// A bound wheel's or tilt's motion not yet a whole notch.
+    notch: [i32; 2],
     tp: Touch,
 }
 
@@ -273,6 +275,7 @@ fn open_dev(path: &str) -> Option<Dev> {
         dy: 0,
         wheel: [0; 2],
         wheel_hi: [0; 2],
+        notch: [0; 2],
         tp: Touch::default(),
     })
 }
@@ -314,7 +317,17 @@ fn event(d: &mut Desk, dev: &mut Dev, ty: u16, code: u16, value: i32, ms: u64, a
             crate::input::key(d, code as u32, pressed, t);
         }
         EV_KEY if dev.kinds.contains(&Kind::Touchpad) => touchpad_key(d, dev, code, value, ms),
-        EV_KEY if (BTN_LEFT..=BTN_LEFT + 7).contains(&code) => crate::input::pointer_button(d, code as u32, value != 0, t),
+        // A bound button does its own thing (mousebind.rs), the others are buttons.
+        EV_KEY if (BTN_LEFT..=BTN_LEFT + 7).contains(&code) => {
+            if value != 2 && !crate::mousebind::button(d, code, value != 0, t) {
+                crate::input::pointer_button(d, code as u32, value != 0, t);
+            }
+        }
+        EV_KEY if dev.kinds.contains(&Kind::Mouse) && (BTN_LEFT + 8..BTN_LEFT + 16).contains(&code) => {
+            if value != 2 {
+                crate::mousebind::button(d, code, value != 0, t);
+            }
+        }
         EV_REL => match code {
             REL_X => dev.dx += value,
             REL_Y => dev.dy += value,
@@ -341,6 +354,24 @@ fn event(d: &mut Desk, dev: &mut Dev, ty: u16, code: u16, value: i32, ms: u64, a
             for axis in 0..2 {
                 let (lo, hi) = (std::mem::take(&mut dev.wheel[axis]), std::mem::take(&mut dev.wheel_hi[axis]));
                 let v120 = if dev.hires_wheel { hi } else { lo * 120 };
+                // Bound tilt, or the wheel with G-Shift: a tap of the binding per notch.
+                if v120 != 0 {
+                    let name = match (axis, v120 > 0) {
+                        (1, true) => "tilt_right",
+                        (1, false) => "tilt_left",
+                        (_, true) => "wheel_up",
+                        (_, false) => "wheel_down",
+                    };
+                    if crate::mousebind::bound(d, name) {
+                        dev.notch[axis] += v120;
+                        while dev.notch[axis].abs() >= 120 {
+                            dev.notch[axis] -= 120 * dev.notch[axis].signum();
+                            crate::mousebind::tap(d, name, t);
+                        }
+                        continue;
+                    }
+                    dev.notch[axis] = 0;
+                }
                 if v120 != 0 {
                     // evdev: wheel up / tilt right positive; Wayland: down / right positive.
                     let v = if axis == 0 { -v120 } else { v120 };

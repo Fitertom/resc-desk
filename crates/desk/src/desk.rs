@@ -131,6 +131,8 @@ pub struct Desk {
     pub on_screen: std::collections::HashMap<usize, Option<(crate::slab::Key, wl::ObjId)>>,
     /// The live wallpaper, when on (livewall.rs).
     pub live: Option<Box<crate::livewall::Live>>,
+    /// The mouse's buttons' bindings and G-Shift (mousebind.rs).
+    pub mouse: crate::mousebind::Binds,
     /// Monitors: the Win+P panel, a reconfiguration to do (monitors.rs).
     pub mons: crate::monitors::State,
     /// Vulkan renderer; None: the CPU draws everything (gpu.rs `init`).

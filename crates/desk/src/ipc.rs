@@ -39,7 +39,10 @@ fn btn(name: &str) -> Result<u32, String> {
         "left" => input::BTN_LEFT,
         "right" => input::BTN_RIGHT,
         "middle" => input::BTN_MIDDLE,
-        _ => return Err(format!("unknown button {name}")),
+        _ => match crate::mousebind::BUTTONS.iter().find(|b| b.0 == name && b.1 != 0) {
+            Some(b) => b.1 as u32,
+            None => return Err(format!("unknown button {name}")),
+        },
     })
 }
 
@@ -153,12 +156,18 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
         }
         "button" => {
             let bt = btn(arg(0)?)?;
+            // As from the mouse: a bound button does its binding (mousebind.rs).
+            let mut press = |d: &mut Desk, down: bool, t: u32| {
+                if !crate::mousebind::button(d, bt as u16, down, t) {
+                    input::pointer_button(d, bt, down, t);
+                }
+            };
             match rest.get(1).copied().unwrap_or("click") {
-                "down" => input::pointer_button(d, bt, true, t),
-                "up" => input::pointer_button(d, bt, false, t),
+                "down" => press(d, true, t),
+                "up" => press(d, false, t),
                 _ => {
-                    input::pointer_button(d, bt, true, t);
-                    input::pointer_button(d, bt, false, t + 1);
+                    press(d, true, t);
+                    press(d, false, t + 1);
                 }
             }
         }
@@ -278,6 +287,13 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
                 Some((x, y)) => crate::life::launch_from(d, &cmd, &icon, &nm, r.translate(x, y)),
                 None => crate::life::launch(d, &cmd, &icon, &nm, None),
             }
+        }
+        // mouse-bind NAME LAYER ACTION…: a mouse button's binding (mousebind.rs).
+        "mouse-bind" => {
+            let name = arg(0)?.to_string();
+            let layer: u8 = arg(1)?.parse().map_err(|_| "bad layer")?;
+            let act = crate::mousebind::Act::parse(&rest[2..].join(" "));
+            crate::mousebind::set(d, &name, layer, act);
         }
         // fullscreen: the focused window on or off fullscreen (tests).
         "fullscreen" => {
@@ -474,6 +490,7 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             out.push_str(&format!("taskbar_autohide {}\n", if d.display_cfg.taskbar_autohide { "on" } else { "off" }));
             out.push_str(&format!("taskbar_keep_desktop {}\n", if d.display_cfg.taskbar_keep_desktop { "on" } else { "off" }));
             out.push_str(match &d.live { Some(l) if l.on_picture => "livewall picture\n", Some(_) => "livewall on\n", None => "livewall off\n" });
+            out.push_str(&crate::mousebind::state(d));
             for m in b.monitors(d) {
                 out.push_str(&format!(
                     "mon {} {} {} {} {} {} {} {} {} {} {} {}\n",

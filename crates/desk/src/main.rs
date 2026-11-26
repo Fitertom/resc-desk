@@ -1,6 +1,7 @@
 //! resc-desk: a Wayland compositor + desktop shell written from scratch in Rust.
 mod anim;
 mod prof;
+mod mousebind;
 mod livewall;
 mod toast;
 mod xcursor;
@@ -254,6 +255,7 @@ fn main() {
         toasts: Vec::new(),
         on_screen: Default::default(),
         live: None,
+        mouse: crate::mousebind::load(),
         mons: Default::default(),
         gpu: None,
         bench: Default::default(),
