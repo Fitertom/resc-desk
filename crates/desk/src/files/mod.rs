@@ -1183,7 +1183,17 @@ impl App {
         if !self.show_ext && !e.dir && model::type_for_ext(&e.ext).is_some() {
             disp = disp.chars().take(model::stem_len(&e.name, false)).collect();
         }
-        Item { disp, kind: k.name, icon: k.icon, mime: k.mime, orig: None, deleted: 0, packed: 0, inner: String::new(), drive: None, folder: String::new(), group: (0, String::new()), e }
+        let mut icon = k.icon;
+        // A program's shortcut shows the program: its name and icon (as .lnk in Windows).
+        if e.ext == "desktop" && !e.dir {
+            if let Some(h) = std::fs::read_to_string(&e.path).ok().and_then(|t| open::parse(&t, "")) {
+                disp = h.name;
+                if !h.icon.is_empty() {
+                    icon = format!("{};{icon}", h.icon);
+                }
+            }
+        }
+        Item { disp, kind: k.name, icon, mime: k.mime, orig: None, deleted: 0, packed: 0, inner: String::new(), drive: None, folder: String::new(), group: (0, String::new()), e }
     }
 
     fn load(&mut self) {
@@ -1728,10 +1738,7 @@ impl App {
             return;
         }
         if it.e.ext == "desktop" {
-            if let Some(h) = std::fs::read_to_string(&p).ok().and_then(|t| {
-                let exec = t.lines().find_map(|l| l.strip_prefix("Exec="))?.to_string();
-                Some(open::Handler { id: String::new(), name: String::new(), icon: String::new(), exec, terminal: t.contains("Terminal=true"), mimes: vec![] })
-            }) {
+            if let Some(h) = std::fs::read_to_string(&p).ok().and_then(|t| open::parse(&t, "")) {
                 open::spawn(&open::command(&h, &[]), None);
             }
             return;

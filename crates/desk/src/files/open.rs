@@ -25,7 +25,7 @@ fn app_dirs() -> Vec<PathBuf> {
     v
 }
 
-fn parse(text: &str, id: &str) -> Option<Handler> {
+pub fn parse(text: &str, id: &str) -> Option<Handler> {
     let mut in_entry = false;
     let (mut name, mut name_ru, mut exec, mut icon) = (None, None, None, String::new());
     let (mut hidden, mut term, mut app) = (false, false, false);
