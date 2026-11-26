@@ -2797,12 +2797,47 @@ fn conflict_dialog(id: u32, c: &ops::Conflict) -> Dialog {
 
 // ------------------------------------------------------------------ entry point
 
+/// "%D0%9F%20x" → "П x" (bytes, then UTF-8).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16).map(|v| v as u8);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod link_tests {
+    #[test]
+    fn decodes_file_links() {
+        assert_eq!(super::percent_decode("/home/a%20b/%D0%9F"), "/home/a b/П");
+        assert_eq!(super::percent_decode("/x%2"), "/x%2");
+        assert_eq!(super::percent_decode("/П%zz"), "/П%zz");
+    }
+}
+
 fn parse_loc(a: &str) -> Loc {
     match a {
         "trash:" | "trash:///" => Loc::Trash,
         "computer:" | "computer:///" => Loc::Pc,
         _ => {
-            let a = a.strip_prefix("file://").unwrap_or(a);
+            // A file:// link (xdg-open, «Показать в папке»): its %XX decoded.
+            let a = match a.strip_prefix("file://") {
+                Some(rest) => percent_decode(rest.strip_prefix("localhost").unwrap_or(rest)),
+                None => a.to_string(),
+            };
+            let a = a.as_str();
             let p = PathBuf::from(a.replace("~", &model::home().to_string_lossy()));
             if p.is_dir() {
                 Loc::Dir(p)
