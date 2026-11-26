@@ -29,6 +29,9 @@ pub struct Outgoing {
     pub over_self: bool,
     /// Where in the window the tab was grabbed (a torn-off window opens with it there).
     pub grab: (i32, i32),
+    /// Dragged out of an archive: 7-Zip extracting `paths` to a temp folder; the data
+    /// waits for it (the drop comes after the extraction has had its head start).
+    pub extract: std::cell::RefCell<Option<std::thread::JoinHandle<()>>>,
 }
 
 /// file:// URIs (or plain paths) → paths that exist.
@@ -147,20 +150,48 @@ impl App {
 
     /// Dragged items reached the window's edge: the system drag carries them on.
     pub fn maybe_drag_out(&mut self, x: f64, y: f64, right: bool) -> bool {
-        if self.outgoing.is_some() || !self.outside(x, y) || matches!(self.loc(), Loc::Arc(..) | Loc::Trash | Loc::Pc) {
+        if self.outgoing.is_some() || !self.outside(x, y) || matches!(self.loc(), Loc::Trash | Loc::Pc) {
             return false;
         }
-        let paths = self.sel_paths();
+        let mut paths = self.sel_paths();
         if paths.is_empty() {
             return false;
+        }
+        let mut extract = None;
+        let mut actions = COPY | MOVE | if right { ASK } else { 0 };
+        if let Loc::Arc(arc, _) = self.loc().clone() {
+            // Out of an archive: extract to a temp folder right away and hand those over
+            // (copied, the archive stays as it is).
+            let tmp = self.temp_dir();
+            let pw = self.arcs.get(&arc).and_then(|a| a.1.clone());
+            let rels: Vec<String> = paths.iter().filter_map(|p| p.strip_prefix(&arc).ok()).map(|r| r.to_string_lossy().to_string()).collect();
+            if rels.is_empty() {
+                return false;
+            }
+            paths = rels.iter().map(|r| tmp.join(r)).collect();
+            extract = Some(std::thread::spawn(move || {
+                let mut args = vec!["x".to_string(), "-y".into(), "-bso0".into(), "-bsp0".into(), format!("-o{}", tmp.display())];
+                if let Some(pw) = pw {
+                    args.push(format!("-p{pw}"));
+                }
+                args.push("--".into());
+                args.push(arc.to_string_lossy().to_string());
+                for r in rels {
+                    // A folder: everything under it too.
+                    args.push(format!("{r}/*"));
+                    args.push(r);
+                }
+                let _ = std::process::Command::new("7z").args(&args).current_dir(&tmp).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+            }));
+            actions = COPY;
         }
         self.drag_to = None;
         self.hdrop.hide();
         self.ndrop.hide();
         self.spring_at = None;
         let icon = draw::drag_icon(self);
-        self.outgoing = Some(Outgoing { paths, tab: None, over_self: false, grab: (0, 0) });
-        let actions = COPY | MOVE | if right { ASK } else { 0 };
+        self.crumb_drop = None;
+        self.outgoing = Some(Outgoing { paths, tab: None, over_self: false, grab: (0, 0), extract: std::cell::RefCell::new(extract) });
         self.winreq.push(WinReq::StartDrag { mimes: vec![URI_MIME, "text/plain;charset=utf-8", "text/plain"], actions, icon });
         true
     }
@@ -173,13 +204,16 @@ impl App {
         }
         self.save_tab();
         let icon = draw::tab_icon(self, i);
-        self.outgoing = Some(Outgoing { paths: vec![], tab: Some(i), over_self: false, grab: (gx, gy) });
+        self.outgoing = Some(Outgoing { paths: vec![], tab: Some(i), over_self: false, grab: (gx, gy), extract: Default::default() });
         self.winreq.push(WinReq::StartDrag { mimes: vec![TAB_MIME], actions: MOVE, icon });
     }
 
     /// What our drag hands over as `mime`.
     pub fn drag_data(&self, mime: &str) -> Vec<u8> {
         let Some(o) = &self.outgoing else { return vec![] };
+        if let Some(t) = o.extract.borrow_mut().take() {
+            let _ = t.join();
+        }
         if mime == TAB_MIME {
             return o.tab.and_then(|i| self.tabs.get(i)).map(|t| tab_str(t).into_bytes()).unwrap_or_default();
         }
@@ -195,6 +229,7 @@ impl App {
         self.press = None;
         self.drag_to = None;
         self.spring_at = None;
+        self.crumb_drop = None;
         self.hdrop.hide();
         self.ndrop.hide();
         self.incoming = None;

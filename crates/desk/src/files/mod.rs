@@ -552,7 +552,6 @@ pub struct App {
     pub toast: Option<(String, u64)>,
     last_click: (u64, Hit),
     typeahead: (String, u64),
-    pub have7z: bool,
     pub dirty: bool,
     pub quit: bool,
     pub title: String,
@@ -579,6 +578,8 @@ pub struct App {
     pub desk_cells: HashMap<String, (i32, i32)>,
     pub desk_loaded: bool,
     spring_at: Option<(Hit, u64)>,
+    /// A crumb of the address bar under a drag (lit up as the drop target).
+    pub crumb_drop: Option<usize>,
     pub load_err: Option<String>,
     temp_n: u32,
     then: HashMap<u32, Then>,
@@ -758,7 +759,6 @@ impl App {
             toast: None,
             last_click: (0, Hit::None),
             typeahead: (String::new(), 0),
-            have7z: open::have("7z"),
             dirty: true,
             quit: false,
             title: String::new(),
@@ -778,6 +778,7 @@ impl App {
             desk_cells: HashMap::new(),
             desk_loaded: false,
             spring_at: None,
+            crumb_drop: None,
             load_err: None,
             temp_n: 0,
             then: HashMap::new(),
@@ -1722,7 +1723,7 @@ impl App {
             return;
         }
         let p = it.e.path.clone();
-        if ops::is_archive(&it.e.ext) && self.have7z && !matches!(it.e.ext.as_str(), "deb" | "rpm" | "apk" | "jar") {
+        if ops::is_archive(&it.e.ext) && self.have7z() && !matches!(it.e.ext.as_str(), "deb" | "rpm" | "apk" | "jar") {
             self.navigate(Loc::Arc(p, String::new()));
             return;
         }
@@ -2505,9 +2506,16 @@ impl App {
         // Spring-loaded folders: hold a drag over a folder and it opens.
         let dragging = self.press.as_ref().map_or(false, |p| p.dragging) || self.incoming.is_some();
         if let Some((hit, at)) = self.spring_at {
-            if dragging && !self.desk && sys::now_ns() - at > 1_100_000_000 {
+            // Crumbs open sooner: going up is what they are for.
+            let wait = if matches!(hit, Hit::Crumb(_)) { 700_000_000 } else { 1_100_000_000 };
+            if dragging && !self.desk && sys::now_ns() - at > wait {
                 self.spring_at = None;
-                if let Hit::Item(i) = hit {
+                if let Hit::Crumb(i) = hit {
+                    if let Some((_, l)) = self.crumbs().get(i).cloned() {
+                        self.crumb_drop = None;
+                        self.navigate(l);
+                    }
+                } else if let Hit::Item(i) = hit {
                     if self.items.get(i).map_or(false, |it| it.e.dir && !self.sel[i]) {
                         let l = Loc::Dir(self.items[i].e.path.clone());
                         self.navigate(l);
@@ -2887,6 +2895,11 @@ pub fn run(args: &[String]) -> i32 {
                 Ev::Mods(m) => app.mods = m,
                 Ev::Key(k, down) => {
                     if down {
+                        // Ctrl+V / Shift+Insert may paste: the clipboard read now, here.
+                        if k == crate::textedit::k::V || k == crate::textedit::k::INSERT {
+                            let t = win.clipboard();
+                            input::CLIP_IN.with(|c| *c.borrow_mut() = t);
+                        }
                         app.key(k);
                     }
                 }
@@ -2915,6 +2928,9 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
         app.maximized = win.maximized;
+        if let Some(t) = input::CLIP_OUT.with(|c| c.borrow_mut().take()) {
+            win.set_clipboard(&t);
+        }
         for r in std::mem::take(&mut app.winreq) {
             match r {
                 WinReq::Move => win.begin_move(),
@@ -3032,11 +3048,17 @@ impl App {
         ]
     }
 
+    /// Looked up on each use, not cached at startup: a long-lived window (the desktop)
+    /// must notice 7zip installed after it started.
+    pub fn have7z(&self) -> bool {
+        open::have("7z")
+    }
+
     pub fn zip_menu(&self) -> Vec<MItem> {
         let sel = self.selected();
         let here = self.loc().dir().is_some();
         let arcs: Vec<&Item> = sel.iter().map(|i| &self.items[*i]).filter(|i| !i.e.dir && ops::is_archive(&i.e.ext)).collect();
-        let on = self.have7z;
+        let on = self.have7z();
         let mut v = Vec::new();
         if !arcs.is_empty() && here {
             let one = arcs.len() == 1;
@@ -3444,18 +3466,8 @@ impl App {
             self.toast("Путь скопирован");
             return;
         }
-        if open::have("wl-copy") {
-            if let Ok(mut c) = std::process::Command::new("wl-copy").stdin(std::process::Stdio::piped()).spawn() {
-                use std::io::Write;
-                if let Some(mut i) = c.stdin.take() {
-                    let _ = i.write_all(s.as_bytes());
-                }
-                let _ = c.wait();
-                self.toast("Путь скопирован");
-                return;
-            }
-        }
-        self.toast("Нет буфера обмена (установите wl-clipboard)");
+        input::copy_out(s);
+        self.toast("Путь скопирован");
     }
 
     // -------------------------------------------------------------- dialogs

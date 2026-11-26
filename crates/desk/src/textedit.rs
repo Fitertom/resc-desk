@@ -46,7 +46,7 @@ pub struct TextField {
     redo: Vec<(Vec<char>, usize)>,
 }
 
-mod k {
+pub mod k {
     pub const BACKSPACE: u32 = 14;
     pub const A: u32 = 30;
     pub const C: u32 = 46;

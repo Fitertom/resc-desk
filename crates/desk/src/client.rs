@@ -26,6 +26,8 @@ enum K {
     Offer,
     /// Our own drag's data source.
     Source,
+    /// Our clipboard text's data source.
+    ClipSource,
     /// The overlay popup (xdg_surface / xdg_popup).
     OverXdg,
     OverPopup,
@@ -125,6 +127,9 @@ pub struct Window {
     drag_action: u32,
     drag_dropped: bool,
     offer_action: u32,
+    /// The clipboard: our own source and its text, or the offer of somebody else's.
+    clip: Option<(ObjId, Vec<u8>)>,
+    sel_offer: ObjId,
     overlay: Option<Overlay>,
     /// The surface the pointer is on.
     ptr_surf: ObjId,
@@ -187,6 +192,8 @@ impl Window {
             drag: None,
             drag_action: 0,
             drag_dropped: false,
+            clip: None,
+            sel_offer: 0,
             offer_action: 0,
             overlay: None,
             ptr_surf: 0,
@@ -416,10 +423,11 @@ impl Window {
                 }
                 wl_data_device::Event::Drop => self.events.push(Ev::DndDrop),
                 wl_data_device::Event::Selection { id } => {
-                    // The clipboard: not read this way (yet); let the offer go.
-                    if id != 0 && id != self.offer {
-                        wl_data_offer::req::destroy(&mut self.conn, id);
-                        self.offers.remove(&id);
+                    // The clipboard now: kept to be read on paste; the one before goes.
+                    let old = std::mem::replace(&mut self.sel_offer, id);
+                    if old != 0 && old != id && old != self.offer {
+                        wl_data_offer::req::destroy(&mut self.conn, old);
+                        self.offers.remove(&old);
                     }
                 }
             },
@@ -452,6 +460,21 @@ impl Window {
                 wl_data_source::Event::DndDropPerformed => self.drag_dropped = true,
                 wl_data_source::Event::DndFinished => self.end_drag(true),
                 wl_data_source::Event::Cancelled => self.end_drag(false),
+                _ => {}
+            },
+            K::ClipSource => match ev!(wl_data_source) {
+                wl_data_source::Event::Send { mime_type: _, fd } => {
+                    if let Some((_, t)) = &self.clip {
+                        use std::io::Write;
+                        let _ = std::fs::File::from(fd).write_all(t);
+                    }
+                }
+                wl_data_source::Event::Cancelled => {
+                    // Somebody else copied something.
+                    if let Some((src, _)) = self.clip.take() {
+                        wl_data_source::req::destroy(&mut self.conn, src);
+                    }
+                }
                 _ => {}
             },
             K::OverXdg => {
@@ -649,11 +672,44 @@ impl Window {
 
     /// Reads the dropped (or hovering) data as `mime`; waits up to a second for the source.
     pub fn dnd_receive(&mut self, mime: &str) -> Option<Vec<u8>> {
-        if self.offer == 0 {
+        self.receive(self.offer, mime)
+    }
+
+    /// Puts `text` on the clipboard (we serve it until somebody else copies).
+    pub fn set_clipboard(&mut self, text: &str) {
+        if self.ddev == 0 {
+            return;
+        }
+        if let Some((old, _)) = self.clip.take() {
+            wl_data_source::req::destroy(&mut self.conn, old);
+        }
+        let src = self.new_id(K::ClipSource);
+        wl_data_device_manager::req::create_data_source(&mut self.conn, self.ddm, src);
+        for m in ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING", "TEXT"] {
+            wl_data_source::req::offer(&mut self.conn, src, m);
+        }
+        wl_data_device::req::set_selection(&mut self.conn, self.ddev, src, self.btn_serial);
+        self.clip = Some((src, text.as_bytes().to_vec()));
+        let _ = self.conn.flush();
+    }
+
+    /// The clipboard's text: ours, or read from whoever copied it.
+    pub fn clipboard(&mut self) -> Option<String> {
+        if let Some((_, t)) = &self.clip {
+            return Some(String::from_utf8_lossy(t).to_string());
+        }
+        let id = self.sel_offer;
+        let mimes = self.offers.get(&id).map(|o| o.0.clone()).unwrap_or_default();
+        let m = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING", "TEXT"].into_iter().find(|m| mimes.iter().any(|x| x == m))?;
+        self.receive(id, m).map(|b| String::from_utf8_lossy(&b).to_string())
+    }
+
+    fn receive(&mut self, offer: ObjId, mime: &str) -> Option<Vec<u8>> {
+        if offer == 0 {
             return None;
         }
         let (r, w) = sys::pipe().ok()?;
-        wl_data_offer::req::receive(&mut self.conn, self.offer, mime, w.as_fd());
+        wl_data_offer::req::receive(&mut self.conn, offer, mime, w.as_fd());
         self.conn.flush().ok()?;
         drop(w);
         let mut out = Vec::new();

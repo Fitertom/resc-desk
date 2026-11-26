@@ -225,7 +225,9 @@ fn toolbar(app: &App, cv: &mut Canvas) {
             glyph(cv, clip, Rect::new(ar.x + 32, ar.y + 9, 14, 14), G::Back, DIM);
         }
         for (k, (r, i)) in crumbs.iter().enumerate() {
-            if hov(app, Hit::Crumb(*i)) {
+            if app.crumb_drop == Some(*i) {
+                cv.rrect(clip, *r, 6, if app.drag_to.is_some() { argb(70, 0x60, 0xcd, 0xff) } else { white(26) });
+            } else if hov(app, Hit::Crumb(*i)) {
                 cv.rrect(clip, *r, 6, white(16));
             }
             let last = k + 1 == crumbs.len();

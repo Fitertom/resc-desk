@@ -473,6 +473,8 @@ impl App {
             Hit::Item(i) if self.items[i].e.dir && (!self.sel[i] || self.incoming.as_ref().map_or(false, |i| !i.own)) && !matches!(self.loc(), Loc::Arc(..) | Loc::Trash) && !self.drag_paths().contains(&self.items[i].e.path) => Some(Loc::Dir(self.items[i].e.path.clone())),
             Hit::Nav(i) => Some(self.nav[i].loc.clone()).filter(|l| matches!(l, Loc::Dir(_) | Loc::Trash)),
             Hit::Tab(i) => Some(self.tabs[i].loc.clone()).filter(|l| matches!(l, Loc::Dir(_))),
+            // A folder up the path (not the one we are in, not inside an archive).
+            Hit::Crumb(i) => self.crumbs().get(i).map(|c| c.1.clone()).filter(|l| matches!(l, Loc::Dir(_)) && l != self.loc()),
             // Into this folder: only things from elsewhere (not its own items).
             Hit::Empty | Hit::Item(_) if self.incoming.as_ref().map_or(false, |i| !i.own) && !matches!(self.loc(), Loc::Arc(..) | Loc::Search(..)) => {
                 let here = self.loc().dir().map(Path::to_path_buf);
@@ -481,7 +483,18 @@ impl App {
             }
             _ => None,
         };
-        let spring = matches!(h, Hit::Item(_) | Hit::Nav(_)) && target.is_some();
+        // Held over a crumb it goes there even if nothing can be dropped («Этот ПК», a
+        // folder inside the archive).
+        let crumb_away = match h {
+            Hit::Crumb(i) => self.crumbs().get(i).map_or(false, |c| c.1 != *self.loc()),
+            _ => false,
+        };
+        let spring = (matches!(h, Hit::Item(_) | Hit::Nav(_)) && target.is_some()) || crumb_away;
+        let cd = if crumb_away { if let Hit::Crumb(i) = h { Some(i) } else { None } } else { None };
+        if cd != self.crumb_drop {
+            self.crumb_drop = cd;
+            self.dirty = true;
+        }
         match (self.spring_at, spring) {
             (Some((sh, _)), true) if sh == h => {}
             (_, true) => self.spring_at = Some((h, sys::now_ns())),
@@ -845,6 +858,7 @@ impl App {
         }
         self.band = None;
         self.spring_at = None;
+        self.crumb_drop = None;
         self.dirty = true;
         let h = self.hit(x, y);
         if let Some((from, _)) = self.col_drag.take() {
@@ -1405,13 +1419,19 @@ impl App {
     }
 }
 
-/// The clipboard's text (wl-paste when installed).
+thread_local! {
+    /// Text to put on the clipboard, for the window loop (it owns the connection).
+    pub static CLIP_OUT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// The clipboard's text, read by the window loop just before a key that may paste.
+    pub static CLIP_IN: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The clipboard's text (read through our own connection, see CLIP_IN).
 pub fn paste_text() -> Option<String> {
     if open::dry() {
         return open::DRY_LOG.lock().unwrap().iter().rev().find_map(|l| l.strip_prefix("clip ").map(str::to_string));
     }
-    let o = std::process::Command::new("wl-paste").arg("-n").arg("-t").arg("text/plain;charset=utf-8").stdin(std::process::Stdio::null()).output().ok()?;
-    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).to_string())
+    CLIP_IN.with(|c| c.borrow().clone())
 }
 
 pub fn copy_out(s: &str) {
@@ -1419,11 +1439,5 @@ pub fn copy_out(s: &str) {
         open::DRY_LOG.lock().unwrap().push(format!("clip {s}"));
         return;
     }
-    if let Ok(mut c) = std::process::Command::new("wl-copy").stdin(std::process::Stdio::piped()).spawn() {
-        use std::io::Write;
-        if let Some(mut i) = c.stdin.take() {
-            let _ = i.write_all(s.as_bytes());
-        }
-        let _ = c.wait();
-    }
+    CLIP_OUT.with(|c| *c.borrow_mut() = Some(s.to_string()));
 }
