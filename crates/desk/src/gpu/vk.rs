@@ -67,6 +67,7 @@ pub mod st {
 
 pub const FORMAT_B8G8R8A8_UNORM: u32 = 44;
 pub const FORMAT_R32G32B32A32_SFLOAT: u32 = 109;
+pub const FORMAT_R16G16B16A16_SFLOAT: u32 = 97;
 
 pub mod layout {
     pub const UNDEFINED: u32 = 0;

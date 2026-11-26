@@ -309,6 +309,8 @@ struct LiveRec {
     picture: bool,
     width: f32,
     fresh: bool,
+    /// One step's fade (how much of the trails goes).
+    fade: f32,
 }
 
 /// A pipeline's vertex input: none, the glass's instances (12 vec4), a segment (1 vec4).
@@ -892,10 +894,12 @@ impl Gpu {
         self.p_blur = self.pipeline(m_full, m_blur, false, false, TOPOLOGY_TRIANGLE_LIST)?;
         // Instanced like the glass (12 vec4 per drop).
         self.p_drop = self.pipeline(m_dvert, m_dfrag, true, true, TOPOLOGY_TRIANGLE_STRIP)?;
-        self.p_lw_fade = self.pipeline_cfg(m_full, m_lw_solid, Some(0), Vin::None, TOPOLOGY_TRIANGLE_LIST)?;
-        self.p_lw_sub = self.pipeline_cfg(m_full, m_lw_solid, Some(BLEND_OP_REVERSE_SUBTRACT), Vin::None, TOPOLOGY_TRIANGLE_LIST)?;
-        self.p_lw_tint = self.pipeline_cfg(m_full, m_lw_tint, Some(0), Vin::None, TOPOLOGY_TRIANGLE_LIST)?;
-        self.p_lw_seg = self.pipeline_cfg(m_lw_sv, m_lw_sf, Some(0), Vin::Seg, TOPOLOGY_TRIANGLE_STRIP)?;
+        // The trails are half floats: their fade is exact and goes all the way to nothing.
+        let tf = FORMAT_R16G16B16A16_SFLOAT;
+        self.p_lw_fade = self.pipeline_fmt(m_full, m_lw_solid, Some(0), Vin::None, TOPOLOGY_TRIANGLE_LIST, tf)?;
+        self.p_lw_sub = self.pipeline_fmt(m_full, m_lw_solid, Some(BLEND_OP_REVERSE_SUBTRACT), Vin::None, TOPOLOGY_TRIANGLE_LIST, tf)?;
+        self.p_lw_tint = self.pipeline_fmt(m_full, m_lw_tint, Some(0), Vin::None, TOPOLOGY_TRIANGLE_LIST, tf)?;
+        self.p_lw_seg = self.pipeline_fmt(m_lw_sv, m_lw_sf, Some(0), Vin::Seg, TOPOLOGY_TRIANGLE_STRIP, tf)?;
         for m in [m_full, m_layer, m_gvert, m_shadow, m_uivert, m_uifrag, m_svert, m_sfrag, m_gfrag, m_blur, m_dvert, m_dfrag, m_lw_solid, m_lw_tint, m_lw_sv, m_lw_sf] {
             (self.f.vkDestroyShaderModule)(dev, m, null);
         }
@@ -911,6 +915,11 @@ impl Gpu {
     /// `pipeline` in full: `op` the blend op (premultiplied factors; None: no blending; a
     /// reverse subtract takes the source off the frame), the vertex input.
     unsafe fn pipeline_cfg(&self, vs: H, fs: H, op: Option<u32>, vin: Vin, topology: u32) -> R<H> {
+        self.pipeline_fmt(vs, fs, op, vin, topology, FMT)
+    }
+
+    /// `pipeline_cfg` drawing into an image of format `fmt`.
+    unsafe fn pipeline_fmt(&self, vs: H, fs: H, op: Option<u32>, vin: Vin, topology: u32, fmt: u32) -> R<H> {
         let glass = vin == Vin::Glass;
         let blend = op.is_some();
         let sub = op == Some(BLEND_OP_REVERSE_SUBTRACT);
@@ -981,7 +990,6 @@ impl Gpu {
         let cb = PipelineColorBlendStateCreateInfo { s_type: st::PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, p_next: null, flags: 0, logic_op_enable: 0, logic_op: 0, count: 1, attachments: &att, constants: [0.0; 4] };
         let dyns = [DYNAMIC_VIEWPORT, DYNAMIC_SCISSOR];
         let ds = PipelineDynamicStateCreateInfo { s_type: st::PIPELINE_DYNAMIC_STATE_CREATE_INFO, p_next: null, flags: 0, count: 2, states: dyns.as_ptr() };
-        let fmt = FMT;
         let rci = PipelineRenderingCreateInfo { s_type: st::PIPELINE_RENDERING_CREATE_INFO, p_next: null, view_mask: 0, color_count: 1, color_formats: &fmt, depth_format: 0, stencil_format: 0 };
         let ci = GraphicsPipelineCreateInfo {
             s_type: st::GRAPHICS_PIPELINE_CREATE_INFO,
@@ -1033,13 +1041,17 @@ impl Gpu {
 
     /// `opaque`: the view reads alpha as 1 (XRGB buffers).
     unsafe fn image_sw(&self, w: i32, h: i32, levels: u32, usage: u32, opaque: bool) -> R<Image> {
+        self.image_fmt(w, h, levels, usage, opaque, FMT)
+    }
+
+    unsafe fn image_fmt(&self, w: i32, h: i32, levels: u32, usage: u32, opaque: bool, fmt: u32) -> R<Image> {
         let null = std::ptr::null();
         let ci = ImageCreateInfo {
             s_type: st::IMAGE_CREATE_INFO,
             p_next: null,
             flags: 0,
             image_type: IMAGE_TYPE_2D,
-            format: FMT,
+            format: fmt,
             extent: [w as u32, h as u32, 1],
             mip_levels: levels,
             array_layers: 1,
@@ -1063,7 +1075,7 @@ impl Gpu {
             flags: 0,
             image: img,
             view_type: VIEW_TYPE_2D,
-            format: FMT,
+            format: fmt,
             // IDENTITY ×3, then ONE for alpha when opaque.
             components: [0, 0, 0, if opaque { 2 } else { 0 }],
             range: SubresourceRange::color(0, levels),
@@ -2086,9 +2098,14 @@ impl Gpu {
     /// The live wallpaper's frame for output `k`: its trail image made if new, the moves
     /// written into its segment buffer (the newest kept when there are too many).
     unsafe fn live_prep(&mut self, k: usize, fr: crate::livewall::Frame) -> R<LiveRec> {
+        if fr.reset {
+            if let Some(t) = self.outs[k].trail.as_mut() {
+                t.2 = true;
+            }
+        }
         if self.outs[k].trail.is_none() {
             let (w, h) = (self.outs[k].w, self.outs[k].h);
-            let img = self.image(w, h, 1, usage::COLOR_ATTACHMENT | usage::SAMPLED)?;
+            let img = self.image_fmt(w, h, 1, usage::COLOR_ATTACHMENT | usage::SAMPLED, false, FORMAT_R16G16B16A16_SFLOAT)?;
             let set = self.set(img.view, self.s_near, false)?;
             self.outs[k].trail = Some((img, set, true));
         }
@@ -2114,7 +2131,7 @@ impl Gpu {
         if let Some(t) = self.outs[k].trail.as_mut() {
             t.2 = false;
         }
-        Ok(LiveRec { steps, owed: fr.owed, picture: fr.on_picture, width: fr.width, fresh })
+        Ok(LiveRec { steps, owed: fr.owed, picture: fr.on_picture, width: fr.width, fresh, fade: fr.fade })
     }
 
     /// The live wallpaper's trails brought up to now (before the frame samples them).
@@ -2161,19 +2178,16 @@ impl Gpu {
                 (f.vkCmdBindPipeline)(cmd, BIND_GRAPHICS, self.p_lw_fade);
                 push([w, h, 0.0, 0.0, 0.0, 0.0, 0.0, a]);
                 (f.vkCmdDraw)(cmd, 3, 1, 0, 0);
-                (f.vkCmdBindPipeline)(cmd, BIND_GRAPHICS, self.p_lw_sub);
-                push([w, h, 0.0, 0.0, 1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0, 0.0]);
-                (f.vkCmdDraw)(cmd, 3, 1, 0, 0);
             }
         };
         if lr.fresh && lr.picture {
             fade(1.0);
         }
         if lr.owed > 0 {
-            fade(1.0 - 0.8f32.powi(lr.owed.min(64) as i32));
+            fade(1.0 - (1.0 - lr.fade).powi(lr.owed.min(1024) as i32));
         }
         for &(first, n) in &lr.steps {
-            fade(0.2);
+            fade(lr.fade);
             if n == 0 {
                 continue;
             }

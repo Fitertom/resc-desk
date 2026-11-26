@@ -18,9 +18,12 @@ const G: f32 = 1.0;
 const CLICK_G: f32 = -5.0;
 const CLICK_S: f32 = 0.05;
 const DAMP: f32 = 0.99;
-const STEP: f32 = 1.0 / 60.0;
-/// A trail is gone after this many steps (×0.8 each, and 1/255 off).
-const FADE: usize = 26;
+/// Each of the script's 60 steps a second is split into this many: the same motion and fade
+/// in finer steps, so a tail is a smooth gradient, not 26 bands.
+const SUB: usize = 4;
+const STEP: f32 = 1.0 / (60 * SUB) as f32;
+/// A trail is gone (under half a level of 8 bits) after this many steps.
+const FADE: usize = 30 * SUB;
 
 pub struct Live {
     px: Vec<f32>,
@@ -41,6 +44,8 @@ pub struct Live {
     rng: u64,
     /// Steps taken (glass over the trails is blurred again when it changes, gpu.rs).
     pub gen: u64,
+    /// Per output: its trail image starts over (just switched on or to another mode).
+    started: Vec<bool>,
 }
 
 /// What an output's trail image gets this frame (gpu.rs).
@@ -51,6 +56,10 @@ pub struct Frame {
     pub owed: u32,
     pub on_picture: bool,
     pub width: f32,
+    /// One step's fade: the script's fifth per frame, split over its substeps.
+    pub fade: f32,
+    /// Start the trail image over (cleared, or the picture).
+    pub reset: bool,
 }
 
 impl Live {
@@ -69,6 +78,7 @@ impl Live {
             on_picture,
             rng: sys::now_ns() | 1,
             gen: 0,
+            started: Vec::new(),
         };
         for i in 0..N {
             let v = l.rand().sqrt() * 32.0;
@@ -118,7 +128,7 @@ pub fn tick(d: &mut Desk, dt: f32) -> bool {
     l.pend.resize_with(n_out, VecDeque::new);
     l.owed.resize(n_out, 0);
     l.hist.resize_with(n_out, VecDeque::new);
-    l.acc = (l.acc + dt).min(4.0 * STEP);
+    l.acc = (l.acc + dt).min(4.0 * SUB as f32 * STEP);
     let (mx, my) = (d.seat.x as f32, d.seat.y as f32);
     let rects: Vec<Rect> = d.outputs.iter().map(|o| o.rect()).collect();
     let xfs: Vec<Xf> = d.outputs.iter().map(|o| Xf::new(o.x, o.y, o.scale)).collect();
@@ -129,15 +139,19 @@ pub fn tick(d: &mut Desk, dt: f32) -> bool {
         l.gen += 1;
         let g = if l.pulse > 0.0 { G * CLICK_G } else { G };
         l.pulse -= STEP;
+        // A substep: a SUB-th of the script's move, damping and pull.
+        let h = 1.0 / SUB as f32;
+        let damp = DAMP.powf(h);
+        let g = g * h;
         let mut per: Vec<Vec<[f32; 4]>> = vec![Vec::new(); n_out];
         let mut boxes: Vec<Option<(f32, f32, f32, f32)>> = vec![None; n_out];
         for i in 0..N {
             let (x0, y0) = (l.px[i], l.py[i]);
-            l.px[i] += l.vx[i];
-            l.py[i] += l.vy[i];
+            l.px[i] += l.vx[i] * h;
+            l.py[i] += l.vy[i] * h;
             let (x1, y1) = (l.px[i], l.py[i]);
-            l.vx[i] *= DAMP;
-            l.vy[i] *= DAMP;
+            l.vx[i] *= damp;
+            l.vy[i] *= damp;
             let a = (my - y1).atan2(mx - x1);
             l.vx[i] += a.cos() * g;
             l.vy[i] += a.sin() * g;
@@ -208,5 +222,10 @@ pub fn take(d: &mut Desk, oi: usize) -> Option<Frame> {
     let scale = d.outputs.get(oi)?.scale as f32;
     let steps = l.pend.get_mut(oi).map(|p| p.drain(..).collect()).unwrap_or_default();
     let owed = l.owed.get_mut(oi).map(std::mem::take).unwrap_or(0);
-    Some(Frame { steps, owed, on_picture: l.on_picture, width: scale.max(1.0) })
+    if l.started.len() <= oi {
+        l.started.resize(oi + 1, false);
+    }
+    let reset = !std::mem::replace(&mut l.started[oi], true);
+    let fade = 1.0 - 0.8f32.powf(1.0 / SUB as f32);
+    Some(Frame { steps, owed, on_picture: l.on_picture, width: scale.max(1.0), fade, reset })
 }
