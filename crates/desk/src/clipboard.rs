@@ -3,12 +3,13 @@
 //! Every time an app copies text, the compositor reads it once through a pipe (in the
 //! event loop, never blocking) and keeps it. Win+V shows the history on glass; picking
 //! an entry makes it the clipboard (a source the compositor itself serves) and pastes it
-//! into the focused window with Ctrl+V. Text only for now; kept in memory, not on disk.
+//! into the focused window with Ctrl+V. Text and pictures (Win+Shift+S, an image copied in
+//! an app), kept in memory, not on disk. The panel rises from below as it opens.
 //! Sources marked secret by password managers are not recorded.
 use crate::desk::{Desk, TOK_CLIP};
 use crate::font;
 use crate::geom::Rect;
-use crate::render::{argb, Canvas, Xf};
+use crate::render::{argb, fade, Canvas, Xf};
 use crate::shell::col;
 use crate::state::{DKey, DataSource};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -16,16 +17,38 @@ use std::sync::Arc;
 
 /// Text types we read and offer, best first.
 pub const TEXT_MIMES: [&str; 5] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING", "TEXT"];
+/// Picture types we read, best first.
+pub const IMAGE_MIMES: [&str; 3] = ["image/png", "image/jpeg", "image/jpg"];
 const KEEP: usize = 25;
+/// At most this many pictures are kept (they are large).
+const KEEP_IMAGES: usize = 8;
 const MAX_BYTES: usize = 4 << 20;
+const MAX_IMAGE_BYTES: usize = 64 << 20;
+/// A picture's preview: at most this tall.
+const THUMB_H: i32 = 150;
+/// How far below its place the panel starts rising from.
+const RISE: f32 = 64.0;
 const W: i32 = 400;
 const MAX_H: i32 = 560;
 const PREVIEW_LINES: usize = 3;
 const LINE_H: i32 = 19;
 
 pub struct Entry {
+    /// The data as offered (text, or the picture's file).
     pub text: Arc<Vec<u8>>,
     pub at: (u32, u32),
+    /// A picture: its type and preview.
+    pub image: Option<Picture>,
+}
+
+pub struct Picture {
+    pub mime: String,
+    pub w: i32,
+    pub h: i32,
+    /// Preview pixels, `tw`×`th` (opaque ARGB).
+    pub thumb: Vec<u32>,
+    pub tw: i32,
+    pub th: i32,
 }
 
 struct Read {
@@ -36,6 +59,8 @@ struct Read {
     dk: DKey,
     /// Also insert it into the start menu's search field (Ctrl+V there).
     paste: bool,
+    /// A picture of this type (else text).
+    image: Option<String>,
 }
 
 #[derive(Default)]
@@ -50,6 +75,10 @@ pub struct Clip {
     top: usize,
     /// The selection that history[0] was read from.
     last_dk: Option<DKey>,
+    /// Output the panel is drawn on (also while it sinks away after closing).
+    pub shown: Option<usize>,
+    /// 0 below its place, 1 in place.
+    rise: crate::anim::Spring,
 }
 
 // ------------------------------------------------------------------ capture
@@ -64,13 +93,18 @@ fn start_read(d: &mut Desk, dk: DKey, paste: bool) {
     if src.own.is_some() || (!paste && src.mimes.iter().any(|m| m == "x-kde-passwordManagerHint")) {
         return;
     }
-    let Some(mime) = TEXT_MIMES.iter().find(|m| src.mimes.iter().any(|x| x == *m)) else { return };
+    let has = |m: &&&str| src.mimes.iter().any(|x| x == **m);
+    let (mime, image) = match (TEXT_MIMES.iter().find(has), IMAGE_MIMES.iter().find(has)) {
+        (Some(m), _) => (*m, None),
+        (None, Some(m)) if !paste => (*m, Some(m.to_string())),
+        _ => return,
+    };
     let Ok((r, w)) = sys::pipe() else { return };
     crate::server::source_send(d, dk, mime, w);
     let id = d.clip.next_id;
     d.clip.next_id += 1;
     if d.ep.add(r.as_raw_fd(), TOK_CLIP | id, sys::EPOLLIN).is_ok() {
-        d.clip.reads.push(Read { id, fd: r, buf: Vec::new(), dk, paste });
+        d.clip.reads.push(Read { id, fd: r, buf: Vec::new(), dk, paste, image });
     }
 }
 
@@ -84,7 +118,7 @@ pub fn readable(d: &mut Desk, tok: u64) {
         if n > 0 {
             let r = &mut d.clip.reads[i];
             r.buf.extend_from_slice(&chunk[..n as usize]);
-            if r.buf.len() > MAX_BYTES {
+            if r.buf.len() > if r.image.is_some() { MAX_IMAGE_BYTES } else { MAX_BYTES } {
                 r.buf.clear();
                 break true; // too big to keep: drop it
             }
@@ -108,6 +142,16 @@ pub fn readable(d: &mut Desk, tok: u64) {
                 d.start_field.insert(&search_text(&r.buf));
                 d.start_sel = 0;
                 crate::shell::damage_start(d);
+            }
+            return;
+        }
+        if let Some(mime) = r.image {
+            let img = if mime == "image/png" { crate::wallpaper::decode_png(&r.buf) } else { crate::jpeg::decode(&r.buf) };
+            if let Some(img) = img {
+                let p = picture(mime, &img.px, img.w as i32, img.h as i32);
+                if push_entry(d, r.buf, Some(p)) {
+                    d.clip.last_dk = Some(r.dk);
+                }
             }
             return;
         }
@@ -156,16 +200,52 @@ fn search_text(b: &[u8]) -> String {
     s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().filter(|c| !c.is_control()).take(256).collect()
 }
 
-/// Adds to the history (or moves an equal entry to the top). False if nothing kept.
+/// A picture's history entry: its preview fits the panel's cell.
+fn picture(mime: String, px: &[u32], w: i32, h: i32) -> Picture {
+    let max_w = W - 32 - 28;
+    let s = (max_w as f64 / w as f64).min(THUMB_H as f64 / h as f64).min(1.0);
+    let (tw, th) = (((w as f64 * s).round() as i32).max(1), ((h as f64 * s).round() as i32).max(1));
+    let img = crate::wallpaper::Image { w: w as usize, h: h as usize, px: px.to_vec() };
+    let thumb = crate::wallpaper::thumb(&img, tw as usize, th as usize);
+    Picture { mime, w, h, thumb, tw, th }
+}
+
+/// Win+Shift+S took a picture and made it the selection `dk`: into the history.
+pub fn snipped(d: &mut Desk, dk: DKey, png: Arc<Vec<u8>>, px: &[u32], w: i32, h: i32) {
+    let p = picture("image/png".into(), px, w, h);
+    let bytes = Arc::try_unwrap(png).unwrap_or_else(|a| (*a).clone());
+    if push_entry(d, bytes, Some(p)) {
+        d.clip.last_dk = Some(dk);
+    }
+}
+
+/// Adds text to the history (or moves an equal entry to the top). False if nothing kept.
 fn push(d: &mut Desk, bytes: Vec<u8>) -> bool {
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
         return false;
     }
+    push_entry(d, bytes, None)
+}
+
+fn push_entry(d: &mut Desk, bytes: Vec<u8>, image: Option<Picture>) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let old = d.clip.shown.map(|oi| panel(d, oi).0);
     let (hh, mm, ..) = crate::clock::local_now();
     let items = &mut d.clip.items;
     items.retain(|e| e.text.as_slice() != bytes.as_slice());
-    items.insert(0, Entry { text: Arc::new(bytes), at: (hh, mm) });
+    items.insert(0, Entry { text: Arc::new(bytes), at: (hh, mm), image });
     items.truncate(KEEP);
+    // The oldest pictures go first.
+    while items.iter().filter(|e| e.image.is_some()).count() > KEEP_IMAGES {
+        if let Some(i) = items.iter().rposition(|e| e.image.is_some()) {
+            items.remove(i);
+        }
+    }
+    if let Some(r) = old {
+        d.damage(r.inflate(crate::shell::GLASS_REACH));
+    }
     if let Some(oi) = d.clip.open {
         let r = panel(d, oi).0;
         d.damage(r.inflate(crate::shell::GLASS_REACH));
@@ -178,7 +258,10 @@ fn make_selection(d: &mut Desk, i: usize) {
     let e = d.clip.items.remove(i);
     let data = e.text.clone();
     d.clip.items.insert(0, e);
-    let mimes = TEXT_MIMES.iter().map(|s| s.to_string()).collect();
+    let mimes = match &d.clip.items[0].image {
+        Some(p) => vec![p.mime.clone()],
+        None => TEXT_MIMES.iter().map(|s| s.to_string()).collect(),
+    };
     let dk = d.sources.insert(DataSource { client: Default::default(), obj: 0, mimes, primary: false, own: Some(data), x11: false, actions: 0 });
     crate::server::set_selection(d, Some(dk));
     d.clip.last_dk = Some(dk);
@@ -206,20 +289,58 @@ pub fn serve(data: Arc<Vec<u8>>, fd: OwnedFd) {
 // ------------------------------------------------------------------ panel
 
 pub fn toggle(d: &mut Desk) {
-    if let Some(oi) = d.clip.open.take() {
-        let r = panel(d, oi).0;
-        d.damage(r.inflate(crate::shell::GLASS_REACH));
+    if d.clip.open.take().is_some() {
+        // Sinks away (tick).
+        d.clip.rise.to(0.0);
+        crate::shell::taskbar_poke(d);
         return;
     }
     crate::shell::close_menus(d);
     d.overlay.switcher = None;
     let oi = crate::shell::bar_output(d, d.output_at(d.seat.x, d.seat.y).unwrap_or(0));
+    if let Some(was) = d.clip.shown.filter(|&o| o != oi) {
+        let r = panel(d, was).0;
+        d.damage(r.inflate(crate::shell::GLASS_REACH));
+        d.clip.rise.snap(0.0);
+    }
+    if d.clip.shown.is_none() {
+        d.clip.rise.snap(0.0);
+    }
     d.clip.open = Some(oi);
+    d.clip.shown = Some(oi);
     d.clip.sel = 0;
     d.clip.top = 0;
     d.clip.hover = None;
+    d.clip.rise.response = 0.32;
+    d.clip.rise.damping = 0.86;
+    d.clip.rise.to(1.0);
     let r = panel(d, oi).0;
     d.damage(r.inflate(crate::shell::GLASS_REACH));
+    crate::shell::taskbar_poke(d);
+}
+
+/// The panel rising or sinking. True while it moves.
+pub fn tick(d: &mut Desk, dt: f32) -> bool {
+    let Some(oi) = d.clip.shown else { return false };
+    if !d.clip.rise.moving() {
+        if d.clip.open.is_none() {
+            d.clip.shown = None;
+        }
+        return false;
+    }
+    let before = panel(d, oi).0;
+    let m = d.clip.rise.step(dt);
+    let after = panel(d, oi).0;
+    d.damage(before.union(&after).inflate(crate::shell::GLASS_REACH));
+    if !m && d.clip.open.is_none() {
+        d.clip.shown = None;
+    }
+    true
+}
+
+/// How far it has risen, 0..1 (for fading what is on it).
+fn shown_alpha(d: &Desk) -> u32 {
+    (d.clip.rise.value.clamp(0.0, 1.0) * 255.0).round() as u32
 }
 
 fn close(d: &mut Desk) {
@@ -317,8 +438,15 @@ fn panel(d: &Desk, oi: usize) -> (Rect, Rect, Vec<(usize, Rect, Vec<String>)>) {
     let mut cells = Vec::new();
     let mut y = 64;
     for (i, e) in d.clip.items.iter().enumerate().skip(d.clip.top) {
-        let lines = preview(&e.text, inner - 28);
-        let h = 14 + lines.len() as i32 * LINE_H + 22 + 10;
+        let (lines, body) = match &e.image {
+            Some(p) => (Vec::new(), p.th),
+            None => {
+                let l = preview(&e.text, inner - 28);
+                let n = l.len() as i32;
+                (l, n * LINE_H)
+            }
+        };
+        let h = 14 + body + 22 + 10;
         if y + h > MAX_H - 16 && !cells.is_empty() {
             break;
         }
@@ -326,7 +454,8 @@ fn panel(d: &Desk, oi: usize) -> (Rect, Rect, Vec<(usize, Rect, Vec<String>)>) {
         y += h + 8;
     }
     let h = if cells.is_empty() { 150 } else { (y + 8).min(MAX_H) };
-    let p = Rect::new(wa.x1() - W - 12, wa.y1() - h - 8, W, h);
+    let drop = ((1.0 - d.clip.rise.value.min(1.0)) * RISE).round() as i32;
+    let p = Rect::new(wa.x1() - W - 12, wa.y1() - h - 8 + drop, W, h);
     let cells = cells.into_iter().map(|(i, r, l)| (i, r.translate(p.x, p.y), l)).collect();
     let clear = Rect::new(p.x1() - 16 - 110, p.y + 18, 110, 30);
     (p, clear, cells)
@@ -334,17 +463,19 @@ fn panel(d: &Desk, oi: usize) -> (Rect, Rect, Vec<(usize, Rect, Vec<String>)>) {
 
 pub fn draw(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
     let (p, clear, cells) = panel(d, oi);
+    let a = shown_alpha(d);
+    let f = |c: u32| fade(c, a);
     crate::shell::draw_glass(cv, clip, xf, p, RADIUS);
-    font::draw_text_w(cv, clip, xf, p.x + 20, p.y + 39, "Буфер обмена", 16.0, col::TEXT, 200, font::W::Bold);
+    font::draw_text_w(cv, clip, xf, p.x + 20, p.y + 39, "Буфер обмена", 16.0, f(col::TEXT), 200, font::W::Bold);
     if d.clip.items.is_empty() {
-        font::draw_text_w(cv, clip, xf, p.x + 20, p.y + 84, "Здесь появится то, что вы скопируете", 13.0, col::TEXT, W - 40, font::W::Semi);
-        font::draw_text(cv, clip, xf, p.x + 20, p.y + 106, "Ctrl+C в любом приложении, потом Win+V", 12.5, col::TEXT_DIM, W - 40);
+        font::draw_text_w(cv, clip, xf, p.x + 20, p.y + 84, "Здесь появится то, что вы скопируете", 13.0, f(col::TEXT), W - 40, font::W::Semi);
+        font::draw_text(cv, clip, xf, p.x + 20, p.y + 106, "Ctrl+C или Win+Shift+S, потом Win+V", 12.5, f(col::TEXT_DIM), W - 40);
         return;
     }
-    cv.rrect(clip, xf.r(clear), xf.len(10), argb(18, 255, 255, 255));
+    cv.rrect(clip, xf.r(clear), xf.len(10), f(argb(18, 255, 255, 255)));
     let t = "Очистить всё";
     let tw = font::text_width_w(t, 12.5, font::W::Semi);
-    font::draw_text_w(cv, clip, xf, clear.x + (clear.w - tw) / 2, clear.y + 20, t, 12.5, col::TEXT, clear.w, font::W::Semi);
+    font::draw_text_w(cv, clip, xf, clear.x + (clear.w - tw) / 2, clear.y + 20, t, 12.5, f(col::TEXT), clear.w, font::W::Semi);
     for (i, r, lines) in cells {
         if !xf.r(r).overlaps(&clip) {
             continue;
@@ -352,21 +483,31 @@ pub fn draw(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
         let sel = d.clip.sel == i;
         let hot = d.clip.hover == Some(i);
         let fill = if sel { argb(34, 255, 255, 255) } else if hot { argb(26, 255, 255, 255) } else { argb(14, 255, 255, 255) };
-        cv.rrect(clip, xf.r(r), xf.len(12), fill);
+        cv.rrect(clip, xf.r(r), xf.len(12), f(fill));
         if sel {
-            cv.rrect_stroke(clip, xf.r(r), xf.len(12), 1.5 * xf.scale as f32, crate::look::accent() & 0xff_ffff, 220, 220);
-        }
-        for (n, l) in lines.iter().enumerate() {
-            font::draw_text(cv, clip, xf, r.x + 14, r.y + 14 + 13 + n as i32 * LINE_H, l, 13.0, col::TEXT, r.w - 28);
+            let s = 220 * a / 255;
+            cv.rrect_stroke(clip, xf.r(r), xf.len(12), 1.5 * xf.scale as f32, crate::look::accent() & 0xff_ffff, s, s);
         }
         let e = &d.clip.items[i];
-        let chars = String::from_utf8_lossy(&e.text).chars().count();
-        let meta = format!("{}  ·  {} {}", fmt_time(e.at), chars, plural(chars, "символ", "символа", "символов"));
-        font::draw_text(cv, clip, xf, r.x + 14, r.y1() - 12, &meta, 11.5, col::TEXT_DIM, r.w - 28);
+        let meta = match &e.image {
+            Some(p) => {
+                let dst = Rect::new(r.x + 14, r.y + 14, p.tw, p.th);
+                cv.blit(clip, xf.r(dst), &p.thumb, p.tw as usize, Rect::new(0, 0, p.tw, p.th), a == 255, a);
+                format!("{}  ·  картинка {}×{}", fmt_time(e.at), p.w, p.h)
+            }
+            None => {
+                for (n, l) in lines.iter().enumerate() {
+                    font::draw_text(cv, clip, xf, r.x + 14, r.y + 14 + 13 + n as i32 * LINE_H, l, 13.0, f(col::TEXT), r.w - 28);
+                }
+                let chars = String::from_utf8_lossy(&e.text).chars().count();
+                format!("{}  ·  {} {}", fmt_time(e.at), chars, plural(chars, "символ", "символа", "символов"))
+            }
+        };
+        font::draw_text(cv, clip, xf, r.x + 14, r.y1() - 12, &meta, 11.5, f(col::TEXT_DIM), r.w - 28);
         if i == 0 {
             let s = "сейчас в буфере";
             let sw = font::text_width_w(s, 11.5, font::W::Semi);
-            font::draw_text_w(cv, clip, xf, r.x1() - 14 - sw, r.y1() - 12, s, 11.5, col::accent(), 160, font::W::Semi);
+            font::draw_text_w(cv, clip, xf, r.x1() - 14 - sw, r.y1() - 12, s, 11.5, f(col::accent()), 160, font::W::Semi);
         }
     }
 }
@@ -390,11 +531,11 @@ fn plural(n: usize, one: &'static str, few: &'static str, many: &'static str) ->
 pub const RADIUS: i32 = 20;
 
 pub fn glass_rect(d: &Desk, oi: usize) -> Option<Rect> {
-    (d.clip.open == Some(oi)).then(|| panel(d, oi).0)
+    (d.clip.shown == Some(oi)).then(|| panel(d, oi).0)
 }
 
 fn redraw(d: &mut Desk) {
-    if let Some(oi) = d.clip.open {
+    if let Some(oi) = d.clip.shown {
         let r = panel(d, oi).0;
         d.damage(r.inflate(crate::shell::GLASS_REACH));
     }
@@ -405,9 +546,10 @@ fn choose(d: &mut Desk, i: usize) {
     if i >= d.clip.items.len() {
         return;
     }
-    let before = panel(d, d.clip.open.unwrap_or(0)).0;
-    d.clip.open = None;
-    d.damage(before.inflate(crate::shell::GLASS_REACH));
+    if d.clip.open.take().is_some() {
+        d.clip.rise.to(0.0);
+        crate::shell::taskbar_poke(d);
+    }
     make_selection(d, i);
     crate::input::paste_into_focus(d);
 }

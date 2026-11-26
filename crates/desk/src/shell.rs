@@ -1413,6 +1413,7 @@ pub fn tick(d: &mut Desk) -> bool {
     moving |= crate::startanim::tick(d, dt as f32);
     moving |= crate::boot::tick(d, dt as f32);
     moving |= crate::osd::tick(d, dt as f32);
+    moving |= crate::clipboard::tick(d, dt as f32);
     moving |= lens_tick(d, dt as f32);
     moving
 }
@@ -1765,7 +1766,7 @@ pub fn draw_overlays(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
         crate::start::draw(d, oi, xf, cv, clip);
     }
     crate::tray::draw(d, oi, xf, cv, clip);
-    if d.clip.open == Some(oi) {
+    if d.clip.shown == Some(oi) {
         crate::clipboard::draw(d, oi, xf, cv, clip);
     }
     crate::monitors::draw(d, oi, xf, cv, clip);

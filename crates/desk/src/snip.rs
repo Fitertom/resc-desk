@@ -152,8 +152,10 @@ pub fn process(d: &mut Desk, b: &mut dyn Backend) {
     }
     let png = crate::png::encode(&img, w, h, w as usize, 1);
     let mimes = vec!["image/png".to_string()];
-    let dk = d.sources.insert(DataSource { client: Default::default(), obj: 0, mimes, primary: false, own: Some(Arc::new(png)), x11: false, actions: 0 });
+    let png = Arc::new(png);
+    let dk = d.sources.insert(DataSource { client: Default::default(), obj: 0, mimes, primary: false, own: Some(png.clone()), x11: false, actions: 0 });
     crate::server::set_selection(d, Some(dk));
+    crate::clipboard::snipped(d, dk, png, &img, w, h);
     eprintln!("snip: {}x{} at {},{} copied", w, h, r.x, r.y);
 }
 
