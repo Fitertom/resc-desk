@@ -12,6 +12,9 @@ pub struct Image {
     pub h: i32,
     pub xhot: i32,
     pub yhot: i32,
+    /// The size it is made for (a theme may draw a 24 cursor in a 32 px image, as Windows'
+    /// cursors do).
+    pub nominal: i32,
     /// Premultiplied ARGB.
     pub px: Vec<u32>,
 }
@@ -116,7 +119,7 @@ fn parse(b: &[u8], size: i32) -> Option<Image> {
         return None;
     }
     let ntoc = u32le(b, 12)? as usize;
-    let mut best: Option<(u32, usize)> = None;
+    let mut best: Option<(u32, usize, u32)> = None;
     for i in 0..ntoc.min(1024) {
         let o = 16 + i * 12;
         let (ty, sub, pos) = (u32le(b, o)?, u32le(b, o + 4)?, u32le(b, o + 8)? as usize);
@@ -124,11 +127,11 @@ fn parse(b: &[u8], size: i32) -> Option<Image> {
             continue;
         }
         let d = (sub as i32 - size).unsigned_abs();
-        if best.map_or(true, |(bd, _)| d < bd) {
-            best = Some((d, pos));
+        if best.map_or(true, |(bd, ..)| d < bd) {
+            best = Some((d, pos, sub));
         }
     }
-    let (_, pos) = best?;
+    let (_, pos, nominal) = best?;
     let (w, h) = (u32le(b, pos + 16)? as i32, u32le(b, pos + 20)? as i32);
     let (xhot, yhot) = (u32le(b, pos + 24)? as i32, u32le(b, pos + 28)? as i32);
     if w <= 0 || h <= 0 || w > 1024 || h > 1024 {
@@ -136,7 +139,7 @@ fn parse(b: &[u8], size: i32) -> Option<Image> {
     }
     let start = pos + 36;
     let px: Vec<u32> = (0..(w * h) as usize).map(|i| u32le(b, start + i * 4)).collect::<Option<_>>()?;
-    Some(Image { w, h, xhot, yhot, px })
+    Some(Image { w, h, xhot, yhot, nominal: nominal as i32, px })
 }
 
 fn theme() -> String {
@@ -170,7 +173,7 @@ mod tests {
             b.extend(v.to_le_bytes());
         }
         let i = super::parse(&b, 24).unwrap();
-        assert_eq!((i.w, i.h, i.xhot, i.yhot), (2, 1, 1, 0));
+        assert_eq!((i.w, i.h, i.xhot, i.yhot, i.nominal), (2, 1, 1, 0, 24));
         assert_eq!(i.px, vec![0xff00_0000, 0xffff_ffff]);
     }
 }

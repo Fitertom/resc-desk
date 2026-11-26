@@ -962,8 +962,9 @@ fn pointer_rect(d: &Desk) -> Rect {
 fn theme_cursor(shape: u32, scale: f64) -> Option<(std::rc::Rc<crate::xcursor::Image>, f64)> {
     let want = (crate::xcursor::base_size() as f64 * scale).round() as i32;
     let img = crate::xcursor::get(shape, want).or_else(|| crate::xcursor::get(1, want))?;
-    // A theme's images come in steps (24, 32, 48…): the nearest drawn at the size wanted.
-    let nominal = img.w.max(img.h).max(1) as f64;
+    // A theme's images come in steps (24, 32, 48…): the nearest drawn at the size wanted,
+    // by the size it is made for (not its pixels: Windows' 32 px images are size 24).
+    let nominal = img.nominal.max(1) as f64;
     let k = if (nominal - want as f64).abs() <= want as f64 * 0.2 { 1.0 } else { want as f64 / nominal };
     Some((img, k))
 }
