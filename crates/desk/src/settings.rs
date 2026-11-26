@@ -261,8 +261,9 @@ struct Model {
     anim_close: usize,
     /// The current wallpaper (None: the built-in one).
     wallpaper: Option<String>,
-    /// Each glass place's dim, blur and edge (look.rs PLACES order).
-    places: [[f32; 3]; 5],
+    /// Each glass place: its key (look.rs PLACES, then `app:ID` of programs with glass of
+    /// their own), its name, its dim, blur and edge.
+    places: Vec<(String, String, [f32; 3])>,
     renderer: String,
     session: String,
     outputs: Vec<Out>,
@@ -282,6 +283,8 @@ struct Model {
 
 fn fetch() -> Model {
     let mut m = Model { max_blur: 40.0, max_bezel: 48.0, ui_scale: 1.0, project: 2, ..Default::default() };
+    let names = ["Проводник", "Параметры", "Календарь", "Таймер", "Заголовки остальных окон"];
+    m.places = crate::look::PLACES.iter().zip(names).map(|(p, n)| (p.key().to_string(), n.to_string(), [0.0; 3])).collect();
     let text = match crate::ipc::request("state") {
         Ok(t) => t,
         Err(e) => {
@@ -306,8 +309,14 @@ fn fetch() -> Model {
             }
             "ui_scale" => m.ui_scale = f(0),
             "place" if n.len() >= 4 => {
-                if let Some(i) = crate::look::PLACES.iter().position(|p| p.key() == n[0]) {
-                    m.places[i] = [f(1) as f32, f(2) as f32, f(3) as f32];
+                let v = [f(1) as f32, f(2) as f32, f(3) as f32];
+                match m.places.iter_mut().find(|p| p.0 == n[0]) {
+                    Some(p) => p.2 = v,
+                    // A program with glass of its own.
+                    None => {
+                        let name = if n.len() > 4 { n[4..].join(" ") } else { n[0].trim_start_matches("app:").to_string() };
+                        m.places.push((n[0].to_string(), name, v));
+                    }
                 }
             }
             "anim" => {
@@ -776,7 +785,7 @@ impl App {
         match ch {
             Ch::Launch => st(&["Из кнопки на панели задач", "Из значка, по которому кликнули"]),
             Ch::Close => st(&["Втягивается в кнопку, кнопка лопается", "Сжимается в каплю и испаряется", "Втягивается в ✕"]),
-            Ch::Place => st(&["Проводник", "Параметры", "Календарь", "Таймер", "Заголовки остальных окон"]),
+            Ch::Place => self.m.places.iter().map(|p| p.1.clone()).collect(),
             Ch::Project => crate::monitors::PROJECTS.iter().map(|p| p.name().to_string()).collect(),
             Ch::Mon => self
                 .m
@@ -888,15 +897,16 @@ impl App {
         if self.drag == Some(sl) {
             self.drag_val as f32
         } else {
-            self.m.places[self.place][i]
+            self.m.places.get(self.place).map_or(0.0, |p| p.2[i])
         }
     }
 
     /// Tells the compositor the chosen place's glass, `i` being `v` now.
     fn send_place(&mut self, i: usize, v: f32) {
-        self.m.places[self.place][i] = v;
-        let [dim, blur, bezel] = self.m.places[self.place];
-        send(&format!("glass-place {} {dim} {blur} {bezel}", crate::look::PLACES[self.place].key()));
+        let Some(p) = self.m.places.get_mut(self.place) else { return };
+        p.2[i] = v;
+        let [dim, blur, bezel] = p.2;
+        send(&format!("glass-place {} {dim} {blur} {bezel}", p.0));
     }
 
     fn devices(&self, input: bool) -> &[crate::pulse::Device] {
@@ -1428,7 +1438,7 @@ impl App {
         // Glass follows the slider at once.
         if let Some(i) = [Sl::PDim, Sl::PBlur, Sl::PBezel].iter().position(|s| *s == sl) {
             let v = self.drag_val as f32;
-            if (self.m.places[self.place][i] - v).abs() > 1e-4 {
+            if self.m.places.get(self.place).is_some_and(|p| (p.2[i] - v).abs() > 1e-4) {
                 self.send_place(i, v);
             }
         }
@@ -1692,7 +1702,14 @@ impl App {
     }
 
     fn refresh(&mut self) {
+        // The chosen glass place stays chosen though programs come and go.
+        let key = self.m.places.get(self.place).map(|p| p.0.clone());
         self.m = fetch();
+        if let Some(i) = key.and_then(|k| self.m.places.iter().position(|p| p.0 == k)) {
+            self.place = i;
+        } else if self.place >= self.m.places.len() {
+            self.place = 0;
+        }
     }
 }
 

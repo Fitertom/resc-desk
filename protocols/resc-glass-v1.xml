@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="resc_glass_v1">
+  <copyright>
+    Copyright © 2026 Fitertom. Permission is hereby granted, free of charge, to any person
+    obtaining a copy of this protocol, to deal in it without restriction (MIT).
+  </copyright>
+
+  <description summary="glass panels under a surface (resc-desk)">
+    A client asks for glass under parts of its surfaces: rounded rectangles where the
+    compositor blurs and tints what is below the surface by then and bends it at the edge,
+    the glass resc-desk draws under its own panels and windows.
+
+    Panels are drawn in the order given, each right before the surface's own content and
+    over every panel given before it: a panel blurs the panels under it. Content of the
+    same surface does not come between two of its panels; for glass over content (a menu's
+    glass over a list) put the upper panel on a subsurface above it: the compositor draws
+    surfaces bottom to top and each surface's glass blurs everything drawn below it,
+    subsurfaces and their glass included, so windows in windows in windows nest.
+
+    The surface should be see-through (an alpha format, premultiplied) where its glass is
+    meant to show.
+  </description>
+
+  <interface name="resc_glass_manager_v1" version="1">
+    <request name="destroy" type="destructor"/>
+
+    <request name="get_glass">
+      <description summary="the glass of a surface">
+        One per surface; a second one while the first lives is a protocol error.
+      </description>
+      <arg name="id" type="new_id" interface="resc_glass_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <enum name="error">
+      <entry name="glass_exists" value="0"/>
+    </enum>
+  </interface>
+
+  <interface name="resc_glass_v1" version="1">
+    <description summary="a surface's glass panels">
+      State is double-buffered: the panels given since the surface's last commit replace
+      its panels on its next commit; a commit with none given keeps the panels it has.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="no glass">The surface's panels go with its next commit.</description>
+    </request>
+
+    <request name="clear">
+      <description summary="no panels">The surface has no panels from its next commit on (until some are added).</description>
+    </request>
+
+    <request name="add_panel">
+      <description summary="a panel of glass">
+        A panel at (x, y) of size width × height in surface-local coordinates, with
+        corners of radius `r_tl`, `r_tr`, `r_br`, `r_bl` (top left, then clockwise).
+        `blur`: the frost's gaussian sigma in surface-local px, 0 for clear glass,
+        negative for the desk's own (as on its windows). `tint`: 0xAARRGGBB, straight
+        alpha, laid over the frost; 0 for the desk's window tint. `bezel`: the band along
+        the edge where the glass bends what is under it, surface px, negative for the
+        desk's own. At most 64 panels per surface.
+
+        What the user set for the program in the desk's settings goes over what it asks
+        for: blur, bezel and the tint's alpha as much stronger or weaker as those are than
+        the desk's default.
+      </description>
+      <arg name="x" type="fixed"/>
+      <arg name="y" type="fixed"/>
+      <arg name="width" type="fixed"/>
+      <arg name="height" type="fixed"/>
+      <arg name="r_tl" type="fixed"/>
+      <arg name="r_tr" type="fixed"/>
+      <arg name="r_br" type="fixed"/>
+      <arg name="r_bl" type="fixed"/>
+      <arg name="blur" type="fixed"/>
+      <arg name="tint" type="uint"/>
+      <arg name="bezel" type="fixed"/>
+      <arg name="flags" type="uint" summary="1: panel (the desk's panel look)"/>
+    </request>
+
+    <request name="clip_panel">
+      <description summary="the last panel cut to a rectangle">
+        The panel added last shows only inside this rectangle (surface-local): a card
+        scrolled half out of a list's view. Without a panel added since the last
+        clear or commit it does nothing.
+      </description>
+      <arg name="x" type="fixed"/>
+      <arg name="y" type="fixed"/>
+      <arg name="width" type="fixed"/>
+      <arg name="height" type="fixed"/>
+    </request>
+
+    <enum name="flags">
+      <entry name="panel" value="1" summary="the look of the desk's panels: a soft shadow, a hairline rim, an inset highlight"/>
+    </enum>
+  </interface>
+</protocol>

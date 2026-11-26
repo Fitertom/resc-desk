@@ -453,10 +453,17 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
         }
         // glass-place PLACE DIM BLUR BEZEL: one glass place's look (look.rs).
         "glass-place" => {
-            let usage = "glass-place files|settings|calendar|timer|windows DIM(0..1) BLUR(px) BEZEL(px)";
-            let p = crate::look::Place::from_key(arg(0)?).ok_or(usage)?;
-            let num = |i: usize| rest.get(i).and_then(|v| v.parse::<f32>().ok()).ok_or(usage.to_string());
-            crate::look::set_glass(p, crate::look::Glass { dim: num(1)?, blur: num(2)?, bezel: num(3)? });
+            let usage = "glass-place files|settings|calendar|timer|windows|app:ID DIM(0..1) BLUR(px) BEZEL(px) | glass-place app:ID reset";
+            let key = arg(0)?;
+            if rest.get(1).copied() == Some("reset") {
+                crate::look::set_app_glass(key.strip_prefix("app:").ok_or(usage)?, None);
+            } else {
+                let num = |i: usize| rest.get(i).and_then(|v| v.parse::<f32>().ok()).ok_or(usage.to_string());
+                let g = crate::look::Glass { dim: num(1)?, blur: num(2)?, bezel: num(3)? };
+                if !crate::look::set_glass_key(key, g) {
+                    return Err(usage.into());
+                }
+            }
             crate::look::publish();
             d.damage_all();
             crate::layout::save_config(d).map_err(|e| e.to_string())?;
@@ -527,6 +534,25 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             for p in crate::look::PLACES {
                 let g = crate::look::glass(p);
                 out.push_str(&format!("place {} {} {} {}\n", p.key(), g.dim, g.blur, g.bezel));
+            }
+            // Programs with glass of their own: the ones set apart, and the ones running now
+            // (resc_glass_v1, Liquify), as «Окна» until set: place app:ID DIM BLUR BEZEL NAME.
+            let mut apps: Vec<String> = crate::look::app_glasses().into_iter().map(|(a, _)| a).collect();
+            for (wk, w) in d.windows.iter() {
+                if !w.app_id.is_empty() && !apps.contains(&w.app_id) && crate::look::Place::of_app(&w.app_id) == crate::look::Place::Windows && (crate::look::glass_under(&w.app_id) || crate::render::window_surfaces(d, wk).iter().any(|(sk, _)| d.surfaces.get(*sk).is_some_and(|s| s.glass_obj != 0))) {
+                    apps.push(w.app_id.clone());
+                }
+            }
+            for a in apps {
+                let g = crate::look::glass_of_app(&a);
+                // Its name in the start menu (.desktop), else its id with a capital.
+                let name = d
+                    .apps
+                    .iter()
+                    .find(|x| x.id.eq_ignore_ascii_case(&a) || x.wmclass.eq_ignore_ascii_case(&a))
+                    .map(|x| x.name.clone())
+                    .unwrap_or_else(|| a.chars().take(1).flat_map(char::to_uppercase).chain(a.chars().skip(1)).collect());
+                out.push_str(&format!("place app:{a} {} {} {} {}\n", g.dim, g.blur, g.bezel, name.replace('\n', " ")));
             }
             out.push_str(&format!("ui_scale {}
 ", d.display_cfg.ui_scale));

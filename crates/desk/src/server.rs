@@ -95,6 +95,7 @@ fn surface_key(d: &Desk, ck: CKey, id: ObjId) -> Option<SKey> {
         | Data::Subsurface(s)
         | Data::Decoration(s)
         | Data::Viewport(s)
+        | Data::Glass(s)
         | Data::FracScale(s)
         | Data::LayerSurface(s) => Some(*s),
         _ => None,
@@ -610,6 +611,62 @@ fn dispatch(d: &mut Desk, ck: CKey, h: wl::wire::MsgHdr, iface: Iface, ver: u32)
                 }
             }
         }
+        Iface::RescGlassManagerV1 => match parse!(d, ck, h, resc_glass_manager_v1) {
+            resc_glass_manager_v1::Request::Destroy => destroy_obj(d, ck, id),
+            resc_glass_manager_v1::Request::GetGlass { id: gid, surface } => {
+                let Some(sk) = surface_of(d, ck, surface) else { return };
+                if d.surfaces[sk].glass_obj != 0 {
+                    d.post_error(ck, id, resc_glass_manager_v1::error::GLASS_EXISTS, "the surface has its glass");
+                    return;
+                }
+                if new_obj(d, ck, gid, Iface::RescGlassV1, 1, Data::Glass(sk)) {
+                    d.surfaces[sk].glass_obj = gid;
+                }
+            }
+        },
+        Iface::RescGlassV1 => {
+            let r = parse!(d, ck, h, resc_glass_v1);
+            let sk = surface_of(d, ck, id);
+            match r {
+                resc_glass_v1::Request::Destroy => {
+                    if let Some(s) = sk.and_then(|k| d.surfaces.get_mut(k)) {
+                        s.pending.glass = Some(Vec::new());
+                        s.glass_obj = 0;
+                    }
+                    destroy_obj(d, ck, id);
+                }
+                resc_glass_v1::Request::Clear => {
+                    if let Some(s) = sk.and_then(|k| d.surfaces.get_mut(k)) {
+                        s.pending.glass = Some(Vec::new());
+                    }
+                }
+                resc_glass_v1::Request::AddPanel { x, y, width, height, r_tl, r_tr, r_br, r_bl, blur, tint, bezel, flags } => {
+                    let Some(s) = sk.and_then(|k| d.surfaces.get_mut(k)) else { return };
+                    let g = s.pending.glass.get_or_insert_with(Vec::new);
+                    let f = |v: wl::Fixed| v.to_f64() as f32;
+                    let (w, h) = (f(width).min(32768.0), f(height).min(32768.0));
+                    if w > 0.0 && h > 0.0 && g.len() < 64 {
+                        let r = (w.min(h) / 2.0).max(0.0);
+                        g.push(crate::state::GlassPanel {
+                            rect: [f(x), f(y), w, h],
+                            radii: [r_tl, r_tr, r_br, r_bl].map(|v| f(v).clamp(0.0, r)),
+                            clip: None,
+                            blur: f(blur).min(crate::glass::MAX_BLUR),
+                            tint,
+                            bezel: f(bezel).min(crate::glass::MAX_BEZEL),
+                            flags,
+                        });
+                    }
+                }
+                resc_glass_v1::Request::ClipPanel { x, y, width, height } => {
+                    let Some(s) = sk.and_then(|k| d.surfaces.get_mut(k)) else { return };
+                    if let Some(p) = s.pending.glass.as_mut().and_then(|g| g.last_mut()) {
+                        let f = |v: wl::Fixed| v.to_f64() as f32;
+                        p.clip = Some([f(x), f(y), f(width).max(0.0), f(height).max(0.0)]);
+                    }
+                }
+            }
+        }
         Iface::WpFractionalScaleManagerV1 => match parse!(d, ck, h, wp_fractional_scale_manager_v1) {
             wp_fractional_scale_manager_v1::Request::Destroy => destroy_obj(d, ck, id),
             wp_fractional_scale_manager_v1::Request::GetFractionalScale { id: fid, surface } => {
@@ -836,6 +893,7 @@ pub fn advertised_globals(d: &mut Desk) {
         (XdgWmBase, 6),
         (ZxdgDecorationManagerV1, 1),
         (WpViewporter, 1),
+        (RescGlassManagerV1, 1),
         (WpFractionalScaleManagerV1, 1),
         (ZxdgOutputManagerV1, 3),
         (WpCursorShapeManagerV1, 1),
@@ -1065,6 +1123,7 @@ fn merge_pending(into: &mut Pending, p: Pending) {
     take!(geometry);
     take!(vp_src);
     take!(vp_dst);
+    take!(glass);
 }
 
 pub fn commit(d: &mut Desk, sk: SKey) {
@@ -1166,6 +1225,16 @@ fn apply_state(d: &mut Desk, sk: SKey, p: Pending) {
     if let Some(o) = p.opaque {
         s.opaque = o;
     }
+    // New glass: where it was and where it is now are drawn anew (with its shadow's margin).
+    let mut glass_dmg: Vec<Rect> = Vec::new();
+    if let Some(g) = p.glass.filter(|g| *g != s.glass) {
+        let m = crate::glass::margin(1.0);
+        glass_dmg.extend(s.glass.iter().chain(g.iter()).map(|p| {
+            let [x, y, w, h] = p.rect;
+            Rect::from_edges(x.floor() as i32, y.floor() as i32, (x + w).ceil() as i32, (y + h).ceil() as i32).inflate(m)
+        }));
+        s.glass = g;
+    }
     if let Some(g) = p.geometry {
         s.geometry = Some(g);
     }
@@ -1228,6 +1297,7 @@ fn apply_state(d: &mut Desk, sk: SKey, p: Pending) {
             dmg.push(lr.intersect(&full));
         }
     }
+    dmg.extend(glass_dmg);
     let ck = s.client;
     if let Some(c) = d.clients.get_mut(ck) {
         for obj in release {

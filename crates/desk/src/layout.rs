@@ -114,8 +114,8 @@ pub fn load_config() -> DisplayConfig {
             ["glass_blur", v] => c.glass_blur = v.parse().unwrap_or(crate::glass::FROST).clamp(0.0, crate::glass::MAX_BLUR),
             // A glass place's dim, blur and edge (look.rs).
             ["glass_place", k, dim, blur, bezel] => {
-                if let (Some(p), Ok(dim), Ok(blur), Ok(bezel)) = (crate::look::Place::from_key(k), dim.parse(), blur.parse(), bezel.parse()) {
-                    crate::look::set_glass(p, crate::look::Glass { dim, blur, bezel });
+                if let (Ok(dim), Ok(blur), Ok(bezel)) = (dim.parse(), blur.parse(), bezel.parse()) {
+                    crate::look::set_glass_key(k, crate::look::Glass { dim, blur, bezel });
                 }
             }
             ["output", name, x, y, w, h] => {
@@ -151,6 +151,9 @@ pub fn save_config(d: &Desk) -> std::io::Result<String> {
     for p in crate::look::PLACES {
         let g = crate::look::glass(p);
         s.push_str(&format!("glass_place {} {} {} {}\n", p.key(), g.dim, g.blur, g.bezel));
+    }
+    for (a, g) in crate::look::app_glasses() {
+        s.push_str(&format!("glass_place app:{a} {} {} {}\n", g.dim, g.blur, g.bezel));
     }
     s.push_str(&format!("anim_launch {}\n", d.display_cfg.anim_launch));
     s.push_str(&format!("anim_close {}\n", d.display_cfg.anim_close));

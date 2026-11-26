@@ -375,6 +375,15 @@ pub struct GlassOp {
     pub id: u64,
     pub under: u64,
     pub hit: bool,
+    /// Shown only inside it (physical; a client's panel, resc_glass_v1).
+    pub clip: Option<Rect>,
+}
+
+/// 0xAARRGGBB straight alpha, its alpha × `k` → premultiplied rgba.
+fn argb_premul(c: u32, k: f32) -> [f32; 4] {
+    let a = ((c >> 24) as f32 / 255.0 * k).clamp(0.0, 1.0);
+    let ch = |sh: u32| ((c >> sh) & 0xff) as f32 / 255.0 * a;
+    [ch(16), ch(8), ch(0), a]
 }
 
 /// Window glass: deeper than the panels', so titles stay readable over anything.
@@ -392,7 +401,7 @@ fn window_glass(d: &Desk, wk: WKey, xf: Xf, before: usize) -> Option<GlassOp> {
         // A notification: a rim of glass around it.
         let f = crate::wm::frame_rect(d, wk)?.inflate(crate::toast::RIM);
         let s = xf.scale as f32;
-        let g = crate::look::glass(crate::look::Place::of_app(&w.app_id));
+        let g = crate::look::glass_of_app(&w.app_id);
         let tint = crate::glass::tint_at(TINT_WINDOW, g.dim);
         let r = crate::toast::RADIUS as f32 * s;
         return Some(GlassOp { rect: xf.r(f), radii: [r; 4], layer: 0, before, tint, bezel: g.bezel * s, panel: false, cover: [Rect::default(); 2], drop: None, sigma: g.blur * s, ..Default::default() });
@@ -402,7 +411,8 @@ fn window_glass(d: &Desk, wk: WKey, xf: Xf, before: usize) -> Option<GlassOp> {
     }
     // A frameless one only when it asks for the glass under all of it and is see-through.
     let bare = !w.ssd;
-    if bare && !(crate::look::glass_under(&w.app_id) && d.surfaces.get(w.surf).is_some_and(|s| !s.is_opaque())) {
+    // (One that places its own glass (resc_glass_v1) has only that.)
+    if bare && !(crate::look::glass_under(&w.app_id) && d.surfaces.get(w.surf).is_some_and(|s| !s.is_opaque() && s.glass_obj == 0)) {
         return None;
     }
     let f = crate::wm::frame_rect(d, wk)?;
@@ -417,7 +427,7 @@ fn window_glass(d: &Desk, wk: WKey, xf: Xf, before: usize) -> Option<GlassOp> {
         cover = [Rect::new(c.x, c.y, c.w, c.h - n), Rect::new(c.x + n, c.y, c.w - 2 * n, c.h)];
     }
     // The place's own dim, blur and edge (look.rs): «Проводник», «Параметры», other windows.
-    let g = crate::look::glass(crate::look::Place::of_app(&w.app_id));
+    let g = crate::look::glass_of_app(&w.app_id);
     let tint = crate::glass::tint_at(TINT_WINDOW, g.dim);
     Some(GlassOp { rect: xf.r(f), radii: [r; 4], layer: 0, before, tint, bezel: g.bezel * s, panel: false, cover, drop: None, sigma: g.blur * s, ..Default::default() })
 }
@@ -1758,6 +1768,57 @@ impl Gpu {
                         }
                         round = crate::wm::frame_rect(d, wk).map(|f| (f, crate::toast::RADIUS - crate::toast::RIM));
                     }
+                    // Its own glass (resc_glass_v1), bottom to top, each over what is below
+                    // it by then (the panels before it too), right under its content.
+                    if pose.is_none() {
+                        if let Some(sf) = d.surfaces.get(sk).filter(|s| !s.glass.is_empty() && s.buffer.is_some()) {
+                            let g = crate::look::glass_of_app(win.and_then(|k| d.windows.get(k)).map_or("", |w| w.app_id.as_str()));
+                            // What it asks for outright goes with the look set for it, as
+                            // much stronger or weaker as that is than the windows' default.
+                            let base = crate::look::default_glass(crate::look::Place::Windows);
+                            let (kb, kz, kd) = (g.blur / base.blur.max(1.0), g.bezel / base.bezel.max(1.0), g.dim / base.dim.max(0.01));
+                            let sc = xf.scale as f32;
+                            for (j, p) in sf.glass.iter().enumerate() {
+                                // Surface-local (fractional) → physical.
+                                let phys = |q: [f32; 4]| {
+                                    let e = |v: f32, o: i32, sh: i32| ((v as f64 - o as f64) * xf.scale).round() as i32 - sh;
+                                    let (x0, y0) = (r.x as f32 + q[0], r.y as f32 + q[1]);
+                                    Rect::from_edges(e(x0, xf.ox, xf.px), e(y0, xf.oy, xf.py), e(x0 + q[2], xf.ox, xf.px), e(y0 + q[3], xf.oy, xf.py))
+                                };
+                                let mut op = GlassOp {
+                                    rect: phys(p.rect),
+                                    radii: p.radii.map(|v| v * sc),
+                                    clip: p.clip.map(phys),
+                                    layer: 0,
+                                    before: draws.len(),
+                                    tint: if p.tint == 0 { crate::glass::tint_at(TINT_WINDOW, g.dim) } else { argb_premul(p.tint, kd) },
+                                    bezel: if p.bezel < 0.0 { g.bezel } else { (p.bezel * kz).min(crate::glass::MAX_BEZEL) } * sc,
+                                    panel: p.flags & 1 != 0,
+                                    sigma: if !crate::glass::frosted() { 0.0 } else if p.blur < 0.0 { g.blur } else { (p.blur * kb).min(crate::glass::max_frost()) } * sc,
+                                    ..Default::default()
+                                };
+                                if op.rect.is_empty() || !op.rect.overlaps(&bounds.inflate(m_px)) {
+                                    continue;
+                                }
+                                let zone = op.rect.inflate(m_px).intersect(&bounds);
+                                op.id = {
+                                    use std::hash::{Hash, Hasher};
+                                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                                    ("surf", sk, j).hash(&mut h);
+                                    h.finish() | 1
+                                };
+                                op.under = under_key(zone, op.sigma, wall_key, &draws, &gens, &win_ops);
+                                let level = blur_plan(op.sigma, w, h).map(|p| p.0);
+                                op.hit = !out_fresh
+                                    && level.is_some()
+                                    && self.outs[k].gcache.get(&op.id).map_or(false, |c| !c.fresh && c.under == op.under && Some(c.level) == level);
+                                if !op.hit {
+                                    zones.push((op.rect, op.cover));
+                                }
+                                win_ops.push(op);
+                            }
+                        }
+                    }
                     // Moving: opaque all the way, stretched with the drop, each axis on its own.
                     let (dst, round) = match &pose {
                         Some(p) => (p.map_px(xf, r), p.clip_px(xf)),
@@ -2074,7 +2135,7 @@ impl Gpu {
             let (border, highlight) = if op.panel { (crate::glass::BORDER_A, crate::glass::HIGHLIGHT) } else { (0.0, 0.0) };
             let v: [[f32; 4]; 12] = [
                 [r.x as f32, r.y as f32, r.w as f32, r.h as f32],     // iRect
-                [0.0, 0.0, out.w as f32, out.h as f32],                 // iClip
+                op.clip.map_or([0.0, 0.0, out.w as f32, out.h as f32], |c| [c.x as f32, c.y as f32, c.x1() as f32, c.y1() as f32]), // iClip
                 [t[0] / a, t[1] / a, t[2] / a, a],                      // iC0: the tint, straight alpha
                 [0.0; 4],                                               // iC1
                 [0.0; 4],                                               // iGrad
@@ -2595,7 +2656,18 @@ impl Gpu {
                         captured[i] = true;
                     }
                 }
+                // A client's panel cut to its clip, shadow and all.
+                let cut = op.clip.map(|c| c.intersect(w));
+                if let Some(c) = cut {
+                    if c.is_empty() {
+                        continue;
+                    }
+                    (f.vkCmdSetScissor)(cmd, 0, 1, &Rect2D { x: c.x, y: c.y, w: c.w as u32, h: c.h as u32 });
+                }
                 self.draw_glass(k, i, op, s);
+                if cut.is_some() {
+                    (f.vkCmdSetScissor)(cmd, 0, 1, &Rect2D { x: w.x, y: w.y, w: w.w as u32, h: w.h as u32 });
+                }
             }
             self.draw_windows(k, &draws[start..], *w);
             // Glass of layer 1 under CPU layer 0 (the preview card's content right on its

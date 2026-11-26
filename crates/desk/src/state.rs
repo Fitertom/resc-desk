@@ -39,6 +39,8 @@ pub enum Data {
     DataOffer(DKey),
     Decoration(SKey),
     Viewport(SKey),
+    /// A surface's glass panels (resc_glass_v1).
+    Glass(SKey),
     FracScale(SKey),
     LayerSurface(SKey),
     Params(Box<crate::dmabuf::Params>),
@@ -170,6 +172,25 @@ pub struct Pending {
     pub geometry: Option<Rect>,
     pub vp_src: Option<Option<(f64, f64, f64, f64)>>,
     pub vp_dst: Option<Option<(i32, i32)>>,
+    pub glass: Option<Vec<GlassPanel>>,
+}
+
+/// A panel of glass a client asked for under its surface (resc_glass_v1), surface-local.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct GlassPanel {
+    /// x, y, w, h.
+    pub rect: [f32; 4],
+    /// Top left, top right, bottom right, bottom left.
+    pub radii: [f32; 4],
+    /// Shown only inside it (x, y, w, h).
+    pub clip: Option<[f32; 4]>,
+    /// Sigma, surface px; negative: the desk's own.
+    pub blur: f32,
+    /// 0xAARRGGBB straight; 0: the desk's window tint.
+    pub tint: u32,
+    /// Surface px; negative: the desk's own.
+    pub bezel: f32,
+    pub flags: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -241,6 +262,9 @@ pub struct Surface {
     pub xwin: u32,
     /// Where an X menu or tooltip sits (global logical coords): X places those itself.
     pub x_pos: Option<(i32, i32)>,
+    /// Glass under parts of it, bottom to top (resc_glass_v1), and its object (0: none).
+    pub glass: Vec<GlassPanel>,
+    pub glass_obj: ObjId,
 }
 
 impl Surface {
@@ -283,6 +307,8 @@ impl Surface {
             gen: 0,
             xwin: 0,
             x_pos: None,
+            glass: Vec::new(),
+            glass_obj: 0,
         }
     }
     /// Window geometry in surface-local coordinates.

@@ -160,7 +160,57 @@ pub fn set_glass(p: Place, g: Glass) {
 
 /// The widest blur any place asks for, CSS px.
 pub fn max_blur() -> f32 {
-    PLACES.iter().map(|p| glass(*p).blur).fold(0.0, f32::max)
+    let apps = APPS.lock().map(|a| a.iter().map(|(_, g)| g.blur).fold(0.0, f32::max)).unwrap_or(0.0);
+    PLACES.iter().map(|p| glass(*p).blur).fold(apps, f32::max)
+}
+
+// ------------------------------------------------------------------ programs' own glass
+
+/// Programs with glass of their own (resc_glass_v1, Liquify) set apart from «Окна»: their
+/// app id and look. Keys `app:ID` in the config and over ctl.
+static APPS: std::sync::Mutex<Vec<(String, Glass)>> = std::sync::Mutex::new(Vec::new());
+
+/// The look a program's glass takes: its own place's for the desk's apps, its own if set,
+/// else that of «Окна».
+pub fn glass_of_app(app_id: &str) -> Glass {
+    let p = Place::of_app(app_id);
+    if p != Place::Windows {
+        return glass(p);
+    }
+    app_glass(app_id).unwrap_or_else(|| glass(Place::Windows))
+}
+
+pub fn app_glass(app_id: &str) -> Option<Glass> {
+    APPS.lock().ok()?.iter().find(|(a, _)| a == app_id).map(|(_, g)| *g)
+}
+
+/// A program's own look (None: as «Окна» again).
+pub fn set_app_glass(app_id: &str, g: Option<Glass>) {
+    let Ok(mut a) = APPS.lock() else { return };
+    a.retain(|(x, _)| x != app_id);
+    if let Some(g) = g {
+        a.push((app_id.to_string(), g.clamped()));
+    }
+}
+
+/// The programs with a look of their own.
+pub fn app_glasses() -> Vec<(String, Glass)> {
+    APPS.lock().map(|a| a.clone()).unwrap_or_default()
+}
+
+/// A glass key (`files`… or `app:ID`) set to `g`; false: no such place.
+pub fn set_glass_key(k: &str, g: Glass) -> bool {
+    if let Some(id) = k.strip_prefix("app:").filter(|id| !id.is_empty()) {
+        set_app_glass(id, Some(g));
+        return true;
+    }
+    match Place::from_key(k) {
+        Some(p) => {
+            set_glass(p, g);
+            true
+        }
+        None => false,
+    }
 }
 
 // ------------------------------------------------------------------ the ambient color
@@ -281,6 +331,9 @@ pub fn to_text() -> String {
         let g = glass(p);
         s += &format!("glass {} {} {} {}\n", p.key(), g.dim, g.blur, g.bezel);
     }
+    for (a, g) in app_glasses() {
+        s += &format!("glass app:{a} {} {} {}\n", g.dim, g.blur, g.bezel);
+    }
     s
 }
 
@@ -294,8 +347,8 @@ pub fn apply_text(text: &str) {
                 }
             }
             ["glass", k, dim, blur, bezel] => {
-                if let (Some(p), Ok(dim), Ok(blur), Ok(bezel)) = (Place::from_key(k), dim.parse(), blur.parse(), bezel.parse()) {
-                    set_glass(p, Glass { dim, blur, bezel });
+                if let (Ok(dim), Ok(blur), Ok(bezel)) = (dim.parse(), blur.parse(), bezel.parse()) {
+                    set_glass_key(k, Glass { dim, blur, bezel });
                 }
             }
             _ => {}
