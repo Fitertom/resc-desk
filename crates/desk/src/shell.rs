@@ -357,10 +357,12 @@ pub fn output_covered(d: &Desk, oi: usize) -> bool {
     false
 }
 
-/// No window on output `oi` (the desktop shows): autohide may leave the taskbar out there.
-fn output_empty(d: &Desk, oi: usize) -> bool {
+/// No window over the taskbar's place on output `oi` (the desktop shows there): autohide
+/// may leave the taskbar out.
+fn bar_place_free(d: &Desk, oi: usize) -> bool {
     let Some(o) = d.outputs.get(oi) else { return true };
-    let or = o.rect();
+    let r = o.rect();
+    let or = Rect::new(r.x, r.y1() - TASKBAR_H, r.w, TASKBAR_H);
     !wm::visible_stack(d).into_iter().any(|wk| {
         let w = &d.windows[wk];
         !w.desktop() && !w.minimized && w.parent.is_none() && wm::frame_rect(d, wk).or_else(|| d.surfaces.get(w.surf).map(|s| Rect::new(w.x, w.y, s.geom().w, s.geom().h))).is_some_and(|r| r.overlaps(&or))
@@ -379,7 +381,7 @@ pub fn taskbar_wanted(d: &Desk, oi: usize) -> bool {
     if !d.display_cfg.taskbar_autohide || open {
         return true;
     }
-    if d.display_cfg.taskbar_keep_desktop && output_empty(d, oi) {
+    if d.display_cfg.taskbar_keep_desktop && bar_place_free(d, oi) {
         return true;
     }
     let (x, y) = (d.seat.x, d.seat.y);

@@ -5,7 +5,7 @@
 //! way behind; the trails die out, and the rest of the desktop fades in.
 //!
 //! The physics is the prototype's (`step`, `burst`, `lagPoint`) at its fixed 60 steps a
-//! second, in desktop (logical) px, scaled from the prototype's 3440 px wide main monitor
+//! second, each split into `SUB` substeps (240 a second: smooth on a 240 Hz monitor), in desktop (logical) px, scaled from the prototype's 3440 px wide main monitor
 //! to ours. Drawn over everything (the CPU path's last item; on the GPU path the
 //! overlays' layer): black where the desktop is not shown yet, the trails on it.
 //!
@@ -25,8 +25,11 @@ const DAMP: f32 = 0.99;
 const PROTO_W: f32 = 3440.0;
 const PROTO_SCALE: f32 = 3.4;
 const PROTO_LAG: f32 = 600.0;
-/// Steps of the ball before it is first shown ("the mouse ten seconds at the centre").
-const PREROLL: usize = 600;
+/// Each of the prototype's 60 steps a second is split into this many substeps (the same
+/// motion, 240 frames a second on a 240 Hz monitor).
+const SUB: usize = 4;
+/// Substeps of the ball before it is first shown ("the mouse ten seconds at the centre").
+const PREROLL: usize = 600 * SUB;
 /// The ball holds while the desktop loads: at least `BALL_MIN`, until the wallpaper is
 /// decoded and the start-up programs have shown their windows, then `SETTLE` without a new
 /// one; never longer than `BALL_MAX` (s).
@@ -34,7 +37,7 @@ const BALL_MIN: f32 = 0.8;
 const SETTLE: f32 = 0.4;
 const BALL_MAX: f32 = 15.0;
 /// The last steps of the preroll drawn into the trails, so the first frame has the ball.
-const PRE_TRAIL: usize = 12;
+const PRE_TRAIL: usize = 12 * SUB;
 /// After the burst: the trails fade over this long (s); the desktop fades in after `SHOW_AT`
 /// over `SHOW_FOR`.
 const TRAIL_FOR: f32 = 2.5;
@@ -42,10 +45,10 @@ const SHOW_AT: f32 = 2.6;
 const SHOW_FOR: f32 = 0.6;
 /// A trail pixel is gone after this many steps (×0.8 each, truncated): only the area drawn
 /// in that many last steps is faded and blended, not the whole screen.
-const FADE_STEPS: usize = 26;
+const FADE_SUB: usize = 112;
 /// Trail points kept per corner particle.
-const HIST: usize = 60;
-const STEP: f32 = 1.0 / 60.0;
+const HIST: usize = 60 * SUB;
+const STEP: f32 = 1.0 / (60 * SUB) as f32;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
@@ -75,9 +78,9 @@ pub struct Boot {
     lead: Vec<(usize, std::collections::VecDeque<(f32, f32)>)>,
     /// The trails, one coverage byte per physical pixel of each output.
     trails: Vec<(Rect, Vec<u8>)>,
-    /// Per output: what each of the last `FADE_STEPS` steps drew (output px), so where the
-    /// trails can be non-zero is their union.
-    drawn: Vec<std::collections::VecDeque<Rect>>,
+    /// Per output: what each of the last updates drew (output px) and its substeps, back to
+    /// `FADE_SUB` substeps ago, so where the trails can be non-zero is their union.
+    drawn: Vec<std::collections::VecDeque<(Rect, usize)>>,
     rng: u64,
     /// Windows still awaited from the start-up programs; when the last one appeared.
     wait: usize,
@@ -95,16 +98,19 @@ impl Boot {
 
     /// One physics step; with `segs`, each particle's move this step is recorded.
     fn step(&mut self, mut segs: Option<&mut Vec<[f32; 4]>>) {
-        let gg = self.g * self.scale;
+        // A 1/SUB part of the prototype's step: moves, damping and gravity in proportion.
+        let h = 1.0 / SUB as f32;
+        let gg = self.g * self.scale * h;
+        let damp = DAMP.powf(h);
         for i in 0..N {
             let (x0, y0) = (self.px[i], self.py[i]);
-            self.px[i] += self.vx[i];
-            self.py[i] += self.vy[i];
+            self.px[i] += self.vx[i] * h;
+            self.py[i] += self.vy[i] * h;
             if let Some(s) = segs.as_deref_mut() {
                 s.push([x0, y0, self.px[i], self.py[i]]);
             }
-            self.vx[i] *= DAMP;
-            self.vy[i] *= DAMP;
+            self.vx[i] *= damp;
+            self.vy[i] *= damp;
             let a = (self.cy - self.py[i]).atan2(self.cx - self.px[i]);
             self.vx[i] += a.cos() * gg;
             self.vy[i] += a.sin() * gg;
@@ -137,11 +143,17 @@ impl Boot {
         self.lead = ord.into_iter().map(|i| (i, std::collections::VecDeque::from([(self.px[i], self.py[i])]))).collect();
     }
 
-    /// One step drawn into the trails: the old ones 20 % dimmer, this step's moves on top at
-    /// `alpha`.
-    fn step_drawn(&mut self, d: &Desk, alpha: f32) {
-        let mut segs = Vec::with_capacity(N);
-        self.step(Some(&mut segs));
+    /// `n` substeps drawn into the trails: the old ones dimmer (20 % per prototype step, in
+    /// one pass), these substeps' moves on top at `alpha`.
+    fn step_drawn(&mut self, d: &Desk, alpha: f32, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let mut segs = Vec::with_capacity(N * n);
+        for _ in 0..n {
+            self.step(Some(&mut segs));
+        }
+        let m = (256.0 * 0.8f32.powf(n as f32 / SUB as f32)).round() as u32;
         for (oi, (p, buf)) in self.trails.iter_mut().enumerate() {
             if oi >= d.outputs.len() {
                 break;
@@ -156,7 +168,7 @@ impl Boot {
                     }
                     for v in ch {
                         if *v != 0 {
-                            *v = ((*v as u32 * 204) >> 8) as u8;
+                            *v = ((*v as u32 * m) >> 8) as u8;
                         }
                     }
                 }
@@ -181,8 +193,9 @@ impl Boot {
                     now = r.intersect(&Rect::new(0, 0, p.w, p.h));
                 }
             }
-            drawn.push_back(now);
-            if drawn.len() > FADE_STEPS {
+            drawn.push_back((now, n));
+            // Gone once FADE_SUB substeps have passed after it.
+            while drawn.len() > 1 && drawn.iter().skip(1).map(|e| e.1).sum::<usize>() >= FADE_SUB {
                 drawn.pop_front();
             }
         }
@@ -206,8 +219,8 @@ impl Boot {
 }
 
 /// Where an output's trails can be non-zero (output px, within `p`'s size).
-fn live_rect(drawn: &std::collections::VecDeque<Rect>, p: Rect) -> Rect {
-    let r = drawn.iter().filter(|r| !r.is_empty()).fold(None, |a: Option<Rect>, r| Some(a.map_or(*r, |a| a.union(r))));
+fn live_rect(drawn: &std::collections::VecDeque<(Rect, usize)>, p: Rect) -> Rect {
+    let r = drawn.iter().map(|e| &e.0).filter(|r| !r.is_empty()).fold(None, |a: Option<Rect>, r| Some(a.map_or(*r, |a| a.union(r))));
     r.map_or(Rect::default(), |r| r.intersect(&Rect::new(0, 0, p.w, p.h)))
 }
 
@@ -274,7 +287,7 @@ pub fn start(d: &mut Desk, wait: usize) {
         .collect();
     b.drawn = vec![Default::default(); d.outputs.len()];
     for _ in 0..PRE_TRAIL {
-        b.step_drawn(d, 1.0);
+        b.step_drawn(d, 1.0, 1);
     }
     d.overlay.boot = Some(Box::new(b));
     d.overlay.animating = true;
@@ -321,17 +334,16 @@ pub fn tick(d: &mut Desk, dt: f32) -> bool {
         b.reveal = (b.reveal + dt / SHOW_FOR).min(1.0);
     }
     let alpha = if b.phase == Phase::Burst { (1.0 - b.t / TRAIL_FOR).max(0.0) } else { 1.0 };
-    let mut n = 0;
-    while b.acc >= STEP && n < 4 {
-        b.step_drawn(d, alpha);
-        b.acc -= STEP;
-        n += 1;
-    }
+    // Substeps due by now (a frame a little early still takes its substep: frame times
+    // jitter around 1/240 s, and 0, 2, 0, 2 would judder), at most a prototype step's 4.
+    let n = ((b.acc / STEP + 0.3).floor().max(0.0) as usize).min(4 * SUB);
+    b.step_drawn(d, alpha, n);
+    b.acc -= n as f32 * STEP;
     if b.acc > 0.1 {
         b.acc = 0.0;
     }
-    // Redrawn only when it changed: the physics is 60 steps a second, a 240 Hz monitor would
-    // otherwise redraw (and upload) every output four times per step.
+    // Redrawn only when it moved: a monitor faster than the substeps would otherwise redraw
+    // (and upload) every output for nothing.
     if n > 0 || b.reveal != reveal0 {
         d.damage_all();
     }
