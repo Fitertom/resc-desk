@@ -89,6 +89,7 @@ enum Sw {
     /// The taskbar on every monitor.
     TbAll,
     TbAuto,
+    TbDesk,
     /// The Bluetooth adapter's power.
     BtPower,
 }
@@ -230,6 +231,7 @@ struct Model {
     project: usize,
     taskbar_all: bool,
     taskbar_autohide: bool,
+    taskbar_keep_desktop: bool,
     error: Option<String>,
 }
 
@@ -274,6 +276,7 @@ fn fetch() -> Model {
             "project" => m.project = crate::monitors::PROJECTS.iter().position(|p| p.key() == v).unwrap_or(2),
             "taskbar" => m.taskbar_all = v != "main",
             "taskbar_autohide" => m.taskbar_autohide = v == "on",
+            "taskbar_keep_desktop" => m.taskbar_keep_desktop = v == "on",
             "mon" if n.len() >= 12 => m.mons.push(Mon {
                 name: n[0].to_string(),
                 on: n[1] == "1",
@@ -843,7 +846,7 @@ impl App {
         self.anims.drive(AK::Switch(Sw::Frost), on(self.m.frosted), SPR_SWITCH);
         self.anims.drive(AK::Switch(Sw::Glue), on(self.m.glue), SPR_SWITCH);
         let mon = self.sel_mon().cloned().unwrap_or_default();
-        for (sw, v) in [(Sw::Primary, mon.primary), (Sw::MonOn, mon.on), (Sw::Vrr, mon.vrr), (Sw::Hdr, mon.hdr), (Sw::TbAll, self.m.taskbar_all), (Sw::TbAuto, self.m.taskbar_autohide)] {
+        for (sw, v) in [(Sw::Primary, mon.primary), (Sw::MonOn, mon.on), (Sw::Vrr, mon.vrr), (Sw::Hdr, mon.hdr), (Sw::TbAll, self.m.taskbar_all), (Sw::TbAuto, self.m.taskbar_autohide), (Sw::TbDesk, self.m.taskbar_keep_desktop)] {
             self.anims.drive(AK::Switch(sw), on(v), SPR_SWITCH);
         }
         let bt_on = self.bt.as_ref().map_or(false, |b| b.state.powered);
@@ -1004,9 +1007,17 @@ impl App {
                 v.push((
                     "Автоматически скрывать панель задач".into(),
                     String::new(),
-                    "Панель уезжает вниз и появляется, когда курсор доходит до нижнего края экрана; развёрнутые окна занимают экран целиком. Над игрой на весь экран панели нет и без этого".into(),
+                    "Панель уезжает вниз и появляется, когда курсор доходит до нижнего края экрана; развёрнутые окна занимают экран целиком. Над окном на весь экран (игрой) она открывается только клавишей Win".into(),
                     Ctl::Switch(Sw::TbAuto),
                 ));
+                if m.taskbar_autohide {
+                    v.push((
+                        "Не скрывать на пустом рабочем столе".into(),
+                        String::new(),
+                        "Пока на мониторе нет окон, панель задач остаётся на месте".into(),
+                        Ctl::Switch(Sw::TbDesk),
+                    ));
+                }
                 if m.mons.len() > 1 {
                     v.push(("Несколько мониторов".into(), String::new(), "То же, что Win+P".into(), Ctl::Choice(Ch::Project)));
                     v.push((
@@ -1380,6 +1391,11 @@ impl App {
                         send(&format!("anim {} {i}", if ch == Ch::Launch { "launch" } else { "close" }));
                     }
                 }
+            }
+            Ctl::Switch(Sw::TbDesk) => {
+                self.m.taskbar_keep_desktop = !self.m.taskbar_keep_desktop;
+                send(&format!("taskbar-desktop {}", if self.m.taskbar_keep_desktop { "on" } else { "off" }));
+                self.refresh();
             }
             Ctl::Switch(Sw::TbAuto) => {
                 self.m.taskbar_autohide = !self.m.taskbar_autohide;

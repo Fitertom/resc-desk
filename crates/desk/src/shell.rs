@@ -357,16 +357,29 @@ pub fn output_covered(d: &Desk, oi: usize) -> bool {
     false
 }
 
+/// No window on output `oi` (the desktop shows): autohide may leave the taskbar out there.
+fn output_empty(d: &Desk, oi: usize) -> bool {
+    let Some(o) = d.outputs.get(oi) else { return true };
+    let or = o.rect();
+    !wm::visible_stack(d).into_iter().any(|wk| {
+        let w = &d.windows[wk];
+        !w.desktop() && !w.minimized && w.parent.is_none() && wm::frame_rect(d, wk).or_else(|| d.surfaces.get(w.surf).map(|s| Rect::new(w.x, w.y, s.geom().w, s.geom().h))).is_some_and(|r| r.overlaps(&or))
+    })
+}
+
 /// Should the taskbar of output `oi` be out now (autohide: the pointer at the bottom edge or
 /// on it, or something of it open)?
-fn taskbar_wanted(d: &Desk, oi: usize) -> bool {
+pub fn taskbar_wanted(d: &Desk, oi: usize) -> bool {
+    let open = d.overlay.start_menu == Some(oi) || d.tray.fly.as_ref().is_some_and(|(o, _)| *o == oi) || d.overlay.switcher.is_some();
+    // Over a game (a window over the whole monitor) only Win brings it, with «Пуск»: the
+    // bottom edge is the game's.
     if output_covered(d, oi) {
-        return false;
+        return open;
     }
-    if !d.display_cfg.taskbar_autohide {
+    if !d.display_cfg.taskbar_autohide || open {
         return true;
     }
-    if d.overlay.start_menu == Some(oi) || d.tray.fly.as_ref().is_some_and(|(o, _)| *o == oi) || d.overlay.switcher.is_some() {
+    if d.display_cfg.taskbar_keep_desktop && output_empty(d, oi) {
         return true;
     }
     let (x, y) = (d.seat.x, d.seat.y);

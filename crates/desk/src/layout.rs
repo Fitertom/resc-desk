@@ -43,6 +43,8 @@ pub struct DisplayConfig {
     pub taskbar_all: bool,
     /// The taskbar slides away and comes back at the screen's bottom edge (Windows' «Автоматически скрывать»).
     pub taskbar_autohide: bool,
+    /// With autohide: it stays out on an empty desktop (no window on that monitor).
+    pub taskbar_keep_desktop: bool,
 }
 
 /// Calibration mode state (Параметры → Мониторы → Калибровка).
@@ -75,6 +77,7 @@ pub fn load_config() -> DisplayConfig {
         project: Default::default(),
         taskbar_all: true,
         taskbar_autohide: false,
+        taskbar_keep_desktop: true,
     };
     let Ok(text) = std::fs::read_to_string(config_path()) else { return c };
     for line in text.lines() {
@@ -97,6 +100,7 @@ pub fn load_config() -> DisplayConfig {
             ["primary", name] => c.primary = Some(name.to_string()),
             ["taskbar", v] => c.taskbar_all = *v != "main",
             ["taskbar_autohide", v] => c.taskbar_autohide = *v == "on",
+            ["taskbar_keep_desktop", v] => c.taskbar_keep_desktop = *v == "on",
             ["project", p] => c.project = crate::monitors::Project::from_key(p).unwrap_or_default(),
             ["glass_blur", v] => c.glass_blur = v.parse().unwrap_or(crate::glass::FROST).clamp(0.0, crate::glass::MAX_BLUR),
             // A glass place's dim, blur and edge (look.rs).
@@ -144,6 +148,7 @@ pub fn save_config(d: &Desk) -> std::io::Result<String> {
     s.push_str(&format!("project {}\n", d.display_cfg.project.key()));
     s.push_str(&format!("taskbar {}\n", if d.display_cfg.taskbar_all { "all" } else { "main" }));
     s.push_str(&format!("taskbar_autohide {}\n", if d.display_cfg.taskbar_autohide { "on" } else { "off" }));
+    s.push_str(&format!("taskbar_keep_desktop {}\n", if d.display_cfg.taskbar_keep_desktop { "on" } else { "off" }));
     let mut mons: Vec<_> = d.display_cfg.mons.iter().collect();
     mons.sort_by(|a, b| a.0.cmp(b.0));
     for (n, c) in mons {
