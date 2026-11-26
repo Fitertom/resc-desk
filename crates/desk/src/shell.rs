@@ -1364,7 +1364,8 @@ pub fn open_settings_page(d: &mut Desk, page: &str) {
         wm::unminimize(d, wk);
         return;
     }
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "resc-desk".into());
+    // (After an update the running file is "<path> (deleted)": the new one is at <path>.)
+    let exe = crate::update::exe_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "resc-desk".into());
     d.spawn(&format!("'{}' settings {page}", exe.replace('\'', r"'\''")));
 }
 

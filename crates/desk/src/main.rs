@@ -217,7 +217,7 @@ fn main() {
             terminal: terminal.clone(),
             launcher: std::env::var("RESC_LAUNCHER").unwrap_or_else(|_| "fuzzel || wofi --show drun".into()),
             files: std::env::var("RESC_FILES").unwrap_or_else(|_| {
-                let exe = std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "resc-desk".into());
+                let exe = update::exe_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "resc-desk".into());
                 format!("'{}' files", exe.replace('\'', r"'\''"))
             }),
             nested,
@@ -312,7 +312,7 @@ fn main() {
     println!("resc-desk running on WAYLAND_DISPLAY={socket_name} ({} backend){x}, control: {ctl_path}", be.name());
     // The desktop's icons («Проводник» in desktop mode); RESC_DESKTOP=0 for none.
     if std::env::var("RESC_DESKTOP").map_or(true, |v| v != "0") {
-        if let Ok(exe) = std::env::current_exe() {
+        if let Ok(exe) = update::exe_path() {
             d.spawn(&format!("'{}' files --desktop", exe.to_string_lossy().replace('\'', r"'\''")));
         }
     }
