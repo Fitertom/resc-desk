@@ -367,6 +367,10 @@ pub struct Window {
     pub pending_pos: Option<(u32, i32, i32)>,
     /// Interactive resize anchor: keep this edge fixed (right/bottom in global coords).
     pub anchor: Option<(u32, i32, i32)>,
+    /// The resize is over: the anchor holds until the client has acked this configure (the
+    /// last size), then goes. Kept longer, every later frame (a hover redraw) would pull the
+    /// window back to where the edge was.
+    pub anchor_until: Option<u32>,
     pub last_cfg: (i32, i32, Vec<u32>),
     pub cfg_serial: u32,
     pub parent: Option<WKey>,

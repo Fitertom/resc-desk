@@ -368,6 +368,8 @@ pub fn pointer_button(d: &mut Desk, button: u32, pressed: bool, time: u32) {
             if let Some(w) = d.windows.get(wk) {
                 let g = d.surfaces[w.surf].geom();
                 wm::send_configure(d, wk, g.w, g.h);
+                let w = &mut d.windows[wk];
+                w.anchor_until = w.anchor.map(|_| w.cfg_serial);
             }
             hover(d, time);
         }
@@ -540,6 +542,10 @@ pub fn begin_move(d: &mut Desk, wk: WKey) {
     if d.seat.buttons.is_empty() || !d.windows.contains(wk) {
         return;
     }
+    // A move forgets any resize anchor (it would pull the window back on the next frame).
+    let w = &mut d.windows[wk];
+    w.anchor = None;
+    w.anchor_until = None;
     let w = &d.windows[wk];
     let (dx, dy) = (d.seat.x - w.x as f64, d.seat.y - w.y as f64);
     d.seat.grab = Grab::Move { wk, dx, dy, sx: d.seat.x, sy: d.seat.y };

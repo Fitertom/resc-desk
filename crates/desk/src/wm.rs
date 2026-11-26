@@ -32,6 +32,7 @@ pub fn create_window(d: &mut Desk, ck: CKey, sk: SKey, toplevel: ObjId) {
         placed: false,
         pending_pos: None,
         anchor: None,
+        anchor_until: None,
         last_cfg: (-1, -1, vec![]),
         cfg_serial: 0,
         parent: None,
@@ -322,6 +323,10 @@ pub fn toplevel_commit(d: &mut Desk, wk: WKey, old_frame: Option<Rect>) {
         }
         if edges & 1 != 0 {
             win.y = ay - g.h;
+        }
+        if win.anchor_until.is_some_and(|s| serial_reached(acked, s)) {
+            win.anchor = None;
+            win.anchor_until = None;
         }
     }
     let new_frame = frame_rect(d, wk);
