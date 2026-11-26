@@ -218,6 +218,7 @@ fn main() {
         selection: None,
         dnd: None,
         place_next: None,
+        places: crate::wm::load_places(),
         primary: None,
         children: vec![],
         running: true,

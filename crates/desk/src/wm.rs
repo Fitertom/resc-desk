@@ -415,6 +415,35 @@ fn place_window(d: &mut Desk, wk: WKey) {
     let wa = workarea(d, oi);
     let now = d.now_ms();
     let hint = d.place_next.take().filter(|h| h.0 == d.windows[wk].app_id && now < h.3);
+    // Where this app's window was when it last closed — unless another of its windows is
+    // open (that one gets the spot; this one cascades from the center as before).
+    let recall = if hint.is_none() && rememberable(&d.windows[wk]) && !others_open(d, wk) { d.places.get(&d.windows[wk].app_id).copied() } else { None };
+    if let Some((r, tile)) = recall {
+        // On the monitor it was on, if that is still there; kept inside its work area.
+        let oi = d.output_for_rect(&r);
+        let wa = workarea(d, oi);
+        let fx = (r.x - b).min(wa.x1() - fw).max(wa.x);
+        let fy = (r.y - t - b).min(wa.y1() - fh).max(wa.y);
+        let w = &mut d.windows[wk];
+        w.x = fx + b;
+        w.y = fy + t + b;
+        w.placed = true;
+        w.output = oi;
+        w.restore = Rect::new(w.x, w.y, g.w, g.h);
+        // Kept on screen by its own floating size, not the size the program opened at.
+        let ffx = (r.x - b).min(wa.x1() - r.w - 2 * b).max(wa.x);
+        let ffy = (r.y - t - b).min(wa.y1() - r.h - t - 2 * b).max(wa.y);
+        let floating = Rect::new(ffx + b, ffy + t + b, r.w, r.h);
+        match tile {
+            Tile::Maximized if w.tile != Tile::Fullscreen => maximize(d, wk),
+            Tile::Snapped(s) => snap(d, wk, s, oi),
+            _ => return,
+        }
+        // Restored from there, it goes back to the size it had floating, not the tiled size
+        // the program opened at.
+        d.windows[wk].restore = floating;
+        return;
+    }
     let (mut fx, mut fy) = if let Some(p) = d.windows[wk].parent.and_then(|p| frame_rect(d, p)) {
         (p.x + (p.w - fw) / 2, p.y + (p.h - fh) / 2)
     } else if let Some((_, ox, oy, _)) = &hint {
@@ -443,7 +472,94 @@ fn place_window(d: &mut Desk, wk: WKey) {
     w.restore = Rect::new(w.x, w.y, g.w, g.h);
 }
 
+/// An app's own main window, not a dialog, the desktop, a notification or an X window (those
+/// place themselves).
+fn rememberable(w: &Window) -> bool {
+    w.parent.is_none() && !w.desktop() && !w.toast && w.x11 == 0 && !w.app_id.is_empty()
+}
+
+fn others_open(d: &Desk, wk: WKey) -> bool {
+    let app = &d.windows[wk].app_id;
+    d.windows.iter().any(|(k, w)| k != wk && w.placed && &w.app_id == app && w.parent.is_none())
+}
+
+/// A window going away: remember where it was, for the app's next window.
+fn remember(d: &mut Desk, wk: WKey) {
+    let w = &d.windows[wk];
+    if !w.placed || !rememberable(w) {
+        return;
+    }
+    let Some(s) = d.surfaces.get(w.surf) else { return };
+    let g = s.geom();
+    let (rect, tile) = match w.tile {
+        Tile::Floating => (Rect::new(w.x, w.y, g.w, g.h), Tile::Floating),
+        Tile::Fullscreen => (w.restore, Tile::Floating),
+        t => (w.restore, t),
+    };
+    // Maximized or snapped, the floating rect may be unknown: the tiled one stands in, it
+    // names the monitor all the same.
+    let rect = if rect.is_empty() { Rect::new(w.x, w.y, g.w.max(1), g.h.max(1)) } else { rect };
+    if d.places.get(&w.app_id) == Some(&(rect, tile)) {
+        return;
+    }
+    d.places.insert(w.app_id.clone(), (rect, tile));
+    save_places(&d.places);
+}
+
+fn places_path() -> String {
+    let base = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())));
+    format!("{base}/resc-desk/places.conf")
+}
+
+fn tile_name(t: Tile) -> String {
+    match t {
+        Tile::Maximized => "max".into(),
+        Tile::Snapped(s) => format!("snap-{s:?}"),
+        _ => "float".into(),
+    }
+}
+
+fn tile_of(s: &str) -> Tile {
+    let snaps = [Snap::Left, Snap::Right, Snap::TopLeft, Snap::TopRight, Snap::BottomLeft, Snap::BottomRight];
+    match s {
+        "max" => Tile::Maximized,
+        _ => snaps.into_iter().find(|x| s == format!("snap-{x:?}")).map_or(Tile::Floating, Tile::Snapped),
+    }
+}
+
+/// `app x y w h tile` a line; the app id last, with its spaces, would be ambiguous, so first
+/// (app ids have none).
+pub fn load_places() -> std::collections::HashMap<String, (Rect, Tile)> {
+    let mut m = std::collections::HashMap::new();
+    for line in std::fs::read_to_string(places_path()).unwrap_or_default().lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() != 6 {
+            continue;
+        }
+        let n: Vec<i32> = f[1..5].iter().filter_map(|v| v.parse().ok()).collect();
+        if n.len() == 4 && n[2] > 0 && n[3] > 0 {
+            m.insert(f[0].to_string(), (Rect::new(n[0], n[1], n[2], n[3]), tile_of(f[5])));
+        }
+    }
+    m
+}
+
+fn save_places(m: &std::collections::HashMap<String, (Rect, Tile)>) {
+    let mut v: Vec<_> = m.iter().collect();
+    v.sort_by(|a, b| a.0.cmp(b.0));
+    let text: String = v.iter().map(|(a, (r, t))| format!("{a} {} {} {} {} {}\n", r.x, r.y, r.w, r.h, tile_name(*t))).collect();
+    let p = places_path();
+    if let Some(dir) = std::path::Path::new(&p).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = format!("{p}.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(tmp, p);
+    }
+}
+
 pub fn unmap_window(d: &mut Desk, wk: WKey) {
+    remember(d, wk);
     crate::life::gone(d, wk);
     damage_window(d, wk);
     let sk = d.windows[wk].surf;
@@ -470,6 +586,7 @@ pub fn destroy_window(d: &mut Desk, wk: WKey) {
     if !d.windows.contains(wk) {
         return;
     }
+    remember(d, wk);
     crate::life::gone(d, wk);
     damage_window(d, wk);
     d.stack.retain(|k| *k != wk);

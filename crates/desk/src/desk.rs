@@ -86,6 +86,10 @@ pub struct Desk {
     /// The next window of this app id opens with point (x, y) of it under the pointer
     /// (a tab torn off «Проводник»); until the deadline (ms).
     pub place_next: Option<(String, i32, i32, u32)>,
+    /// Where each app's window was when it last closed: its floating content rect and how it
+    /// was tiled. A Wayland program cannot place itself; the next window of it opens there
+    /// (wm.rs, kept in ~/.config/resc-desk/places.conf).
+    pub places: std::collections::HashMap<String, (crate::geom::Rect, crate::state::Tile)>,
     /// Primary selection: the last text selected, pasted with the middle button.
     pub primary: Option<DKey>,
     pub children: Vec<std::process::Child>,
