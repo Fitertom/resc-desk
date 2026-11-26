@@ -457,6 +457,7 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             out.push_str(&format!("taskbar {}\n", if d.display_cfg.taskbar_all { "all" } else { "main" }));
             out.push_str(&format!("taskbar_autohide {}\n", if d.display_cfg.taskbar_autohide { "on" } else { "off" }));
             out.push_str(&format!("taskbar_keep_desktop {}\n", if d.display_cfg.taskbar_keep_desktop { "on" } else { "off" }));
+            out.push_str(match &d.live { Some(l) if l.on_picture => "livewall picture\n", Some(_) => "livewall on\n", None => "livewall off\n" });
             for m in b.monitors(d) {
                 out.push_str(&format!(
                     "mon {} {} {} {} {} {} {} {} {} {} {} {}\n",

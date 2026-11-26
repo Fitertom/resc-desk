@@ -92,6 +92,9 @@ enum Sw {
     TbDesk,
     /// The Bluetooth adapter's power.
     BtPower,
+    /// The live wallpaper «Частицы», and over the picture.
+    Live,
+    LivePic,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -232,6 +235,9 @@ struct Model {
     taskbar_all: bool,
     taskbar_autohide: bool,
     taskbar_keep_desktop: bool,
+    /// The live wallpaper: on, over the picture.
+    live: bool,
+    live_pic: bool,
     error: Option<String>,
 }
 
@@ -277,6 +283,10 @@ fn fetch() -> Model {
             "taskbar" => m.taskbar_all = v != "main",
             "taskbar_autohide" => m.taskbar_autohide = v == "on",
             "taskbar_keep_desktop" => m.taskbar_keep_desktop = v == "on",
+            "livewall" => {
+                m.live = v != "off";
+                m.live_pic = v == "picture";
+            }
             "mon" if n.len() >= 12 => m.mons.push(Mon {
                 name: n[0].to_string(),
                 on: n[1] == "1",
@@ -846,7 +856,7 @@ impl App {
         self.anims.drive(AK::Switch(Sw::Frost), on(self.m.frosted), SPR_SWITCH);
         self.anims.drive(AK::Switch(Sw::Glue), on(self.m.glue), SPR_SWITCH);
         let mon = self.sel_mon().cloned().unwrap_or_default();
-        for (sw, v) in [(Sw::Primary, mon.primary), (Sw::MonOn, mon.on), (Sw::Vrr, mon.vrr), (Sw::Hdr, mon.hdr), (Sw::TbAll, self.m.taskbar_all), (Sw::TbAuto, self.m.taskbar_autohide), (Sw::TbDesk, self.m.taskbar_keep_desktop)] {
+        for (sw, v) in [(Sw::Primary, mon.primary), (Sw::MonOn, mon.on), (Sw::Vrr, mon.vrr), (Sw::Hdr, mon.hdr), (Sw::TbAll, self.m.taskbar_all), (Sw::TbAuto, self.m.taskbar_autohide), (Sw::TbDesk, self.m.taskbar_keep_desktop), (Sw::Live, self.m.live), (Sw::LivePic, self.m.live_pic)] {
             self.anims.drive(AK::Switch(sw), on(v), SPR_SWITCH);
         }
         let bt_on = self.bt.as_ref().map_or(false, |b| b.state.powered);
@@ -1105,6 +1115,20 @@ impl App {
                 ));
             }
             Page::Wallpaper => {
+                v.push((
+                    "Живые обои «Частицы»".into(),
+                    String::new(),
+                    "2000 частиц тянутся за курсором и оставляют светящиеся следы; щелчок по рабочему столу разбрасывает их. Считается на видеокарте, перерисовывается только там, где есть следы".into(),
+                    Ctl::Switch(Sw::Live),
+                ));
+                if m.live {
+                    v.push((
+                        "Поверх картинки".into(),
+                        String::new(),
+                        "Следы гаснут к выбранной картинке, а не к чёрному".into(),
+                        Ctl::Switch(Sw::LivePic),
+                    ));
+                }
                 v.push((
                     "Фон рабочего стола".into(),
                     String::new(),
@@ -1391,6 +1415,16 @@ impl App {
                         send(&format!("anim {} {i}", if ch == Ch::Launch { "launch" } else { "close" }));
                     }
                 }
+            }
+            Ctl::Switch(Sw::Live) => {
+                self.m.live = !self.m.live;
+                send(&format!("livewall {}", if !self.m.live { "off" } else if self.m.live_pic { "picture" } else { "on" }));
+                self.refresh();
+            }
+            Ctl::Switch(Sw::LivePic) => {
+                self.m.live_pic = !self.m.live_pic;
+                send(&format!("livewall {}", if self.m.live_pic { "picture" } else { "on" }));
+                self.refresh();
             }
             Ctl::Switch(Sw::TbDesk) => {
                 self.m.taskbar_keep_desktop = !self.m.taskbar_keep_desktop;
