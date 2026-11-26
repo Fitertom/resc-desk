@@ -21,6 +21,7 @@
 
 #define NEEDS_BACKGROUND
 #include "common.glsl"
+#include "bend.glsl"
 
 layout(location = 0) out vec4 outColor;
 
@@ -84,7 +85,7 @@ void main() {
     float dh = (surfaceHeight(min(t + 0.001, 1.0)) - h) / 0.001;
     float slope = atan(dh * (pc.thickness / bezel));
     float thetaR = asin(clamp(sin(slope) / pc.ior, -1.0, 1.0));
-    float displacement = h * pc.thickness * (tan(slope) - tan(thetaR));
+    float displacement = bendDisplacement(d, bezel, pc.thickness, pc.ior);
 
     vec2 grad = vec2(
         sdRoundedRect(p + vec2(0.5, 0.0), pc.halfSize, pc.radius) - sd,

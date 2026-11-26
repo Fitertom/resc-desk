@@ -12,6 +12,7 @@
 // blended across the bridge. Premultiplied output (blend ONE, ONE_MINUS_SRC_ALPHA).
 
 #include "squircle.glsl"
+#include "bend.glsl"
 
 layout(set = 0, binding = 1) uniform sampler2D uWall; // what lies under the glass (the frame so far)
 
@@ -157,7 +158,7 @@ void main() {
         float dh = (surfaceHeight(min(t + 0.001, 1.0)) - h) / 0.001;
         float slope = atan(dh * (thick / bezel));
         float thetaR = asin(clamp(sin(slope) / IOR, -1.0, 1.0));
-        float displacement = h * thick * (tan(slope) - tan(thetaR));
+        float displacement = bendDisplacement(d, bezel, thick, IOR);
         vec2 grad = normalize(vec2(shape(p + vec2(0.5, 0.0)) - sd, shape(p + vec2(0.0, 0.5)) - sd) + 1e-6);
         vec4 under = vec4(frost(p - grad * displacement), 1.0);
         float innerShadow = 1.0 - smoothstep(0.0, bezel * 0.6, d);

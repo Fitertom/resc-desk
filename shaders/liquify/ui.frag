@@ -55,6 +55,7 @@ vec2 P;
 vec2 UV;
 
 #include "squircle.glsl"
+#include "bend.glsl"
 
 // Rounded box with a radius per corner (Apple's continuous corners, squircle.glsl); p is relative to the
 // center, y down.
@@ -203,7 +204,7 @@ vec4 glass(vec2 p, vec2 hb, float sd, vec4 tintCol) {
     float dh = (surfaceHeight(min(t + 0.001, 1.0)) - h) / 0.001;
     float slope = atan(dh * (vQ.z / bezel));
     float thetaR = asin(clamp(sin(slope) / IOR, -1.0, 1.0));
-    float displacement = h * vQ.z * (tan(slope) - tan(thetaR));
+    float displacement = bendDisplacement(d, bezel, vQ.z, IOR);
     vec2 grad = normalize(vec2(sdBox(p + vec2(0.5, 0.0), hb, vRadii) - sd, sdBox(p + vec2(0.0, 0.5), hb, vRadii) - sd) + 1e-6);
 
     vec4 under = backdrop(P - grad * displacement);
