@@ -1129,9 +1129,10 @@ fn shortcut(d: &mut Desk, code: u32) -> bool {
             let c = d.cfg.terminal.clone();
             crate::life::launch_cmd(d, &c);
         }
+        // Win+R: kitty (RESC_LAUNCHER), started like an app (its button grows on the taskbar).
         key::R => {
             let c = d.cfg.launcher.clone();
-            d.spawn(&c);
+            crate::life::launch_cmd(d, &c);
         }
         key::Q => {
             if let Some(wk) = fw {

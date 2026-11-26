@@ -218,7 +218,7 @@ fn main() {
         start_ns: sys::now_ns(),
         cfg: Config {
             terminal: terminal.clone(),
-            launcher: std::env::var("RESC_LAUNCHER").unwrap_or_else(|_| "fuzzel || wofi --show drun".into()),
+            launcher: std::env::var("RESC_LAUNCHER").unwrap_or_else(|_| "kitty".into()),
             files: std::env::var("RESC_FILES").unwrap_or_else(|_| {
                 let exe = update::exe_path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "resc-desk".into());
                 format!("'{}' files", exe.replace('\'', r"'\''"))
