@@ -232,6 +232,7 @@ pub fn pointer_motion(d: &mut Desk, x: f64, y: f64, time: u32) {
             }
         }
         Grab::Shell => {
+            crate::snip::motion(d, x, y);
             crate::tray::drag(d, x);
             crate::taskview::drag(d, x, y);
         }
@@ -389,6 +390,7 @@ pub fn pointer_button(d: &mut Desk, button: u32, pressed: bool, time: u32) {
         }
         Grab::Shell | Grab::Swallow if last => {
             if matches!(d.seat.grab, Grab::Shell) {
+                crate::snip::release(d);
                 crate::tray::release(d);
                 crate::taskview::release(d, d.seat.x, d.seat.y);
             }
@@ -413,7 +415,7 @@ fn first_press(d: &mut Desk, button: u32, time: u32) {
             return;
         }
     }
-    if shell::overlay_click(d, x, y, button) || shell::taskbar_click(d, x, y, button) {
+    if crate::snip::press(d, button) || shell::overlay_click(d, x, y, button) || shell::taskbar_click(d, x, y, button) {
         d.seat.grab = Grab::Shell;
         set_ptr_focus(d, None);
         return;
@@ -931,6 +933,9 @@ pub fn key(d: &mut Desk, code: u32, pressed: bool, time: u32) {
     } else {
         d.seat.keys.retain(|k| *k != code);
     }
+    if crate::snip::key(d, code, pressed) {
+        return;
+    }
     if shell::menu_key(d, code, pressed) {
         return;
     }
@@ -1097,6 +1102,8 @@ fn shortcut(d: &mut Desk, code: u32) -> bool {
         }
         key::D | key::M => wm::show_desktop(d),
         // Win+S = search: our start menu (the bare Win key is eaten by Windows when nested).
+        // Win+Shift+S: a snip of the screen to the clipboard (snip.rs).
+        key::S if shift => crate::snip::toggle(d),
         key::S => shell::toggle_start(d),
         // Win+P: how several monitors are used (monitors.rs).
         key::P => crate::monitors::toggle(d),

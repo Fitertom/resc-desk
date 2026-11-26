@@ -682,7 +682,7 @@ pub fn layer_extents(d: &Desk, oi: usize) -> [Vec<Rect>; 2] {
             _ => {}
         }
     }
-    if d.calib.is_some() {
+    if d.calib.is_some() || crate::snip::active(d) {
         ext[1].push(xf.r(o.rect()));
     }
     if let Some(r) = d.overlay.snap_preview {
@@ -945,7 +945,7 @@ pub fn cursor_rect(d: &Desk) -> Rect {
 }
 
 fn pointer_rect(d: &Desk) -> Rect {
-    if d.seat.cursor_hidden || d.outputs.is_empty() {
+    if d.seat.cursor_hidden || d.outputs.is_empty() || crate::snip::hides_cursor(d) {
         return Rect::default();
     }
     let (x, y) = (d.seat.x as i32, d.seat.y as i32);

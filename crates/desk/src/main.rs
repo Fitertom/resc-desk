@@ -37,6 +37,7 @@ mod settings;
 mod screencopy;
 mod shell;
 mod shm;
+mod snip;
 mod slab;
 mod boot;
 mod life;
@@ -237,6 +238,7 @@ fn main() {
         mm_k: 1.0,
         mm_origin: (0.0, 0.0),
         calib: None,
+        snip: Default::default(),
         shot_crop: None,
         wall: Default::default(),
         clip: Default::default(),
@@ -379,6 +381,7 @@ fn main() {
             }
         }
         screencopy::process(&mut d, be.as_mut());
+        snip::process(&mut d, be.as_mut());
         if let Some(path) = d.pending_screenshot.take() {
             if let Ok(png) = ipc::screenshot(&mut d, be.as_mut(), "all", 1) {
                 let _ = std::fs::write(&path, png);

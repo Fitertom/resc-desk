@@ -115,6 +115,8 @@ pub struct Desk {
     pub mm_k: f64,
     pub mm_origin: (f64, f64),
     pub calib: Option<crate::layout::Calib>,
+    /// Win+Shift+S (snip.rs).
+    pub snip: crate::snip::Snip,
     /// Logical crop for the next "all" screenshot (IPC).
     pub shot_crop: Option<Rect>,
     pub wall: crate::wallpaper::Wall,

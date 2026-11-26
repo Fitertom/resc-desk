@@ -1668,6 +1668,7 @@ pub fn draw_overlays(d: &Desk, oi: usize, xf: Xf, cv: &mut Canvas, clip: Rect) {
     if glass_on_gpu() {
         crate::alttab::draw(d, oi, xf, cv, clip);
     }
+    crate::snip::draw(d, oi, xf, cv, clip);
     draw_peek(d, oi, xf, cv, clip);
     // Over everything while the desk starts.
     crate::boot::draw(d, oi, xf, cv, clip);
