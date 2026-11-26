@@ -89,6 +89,8 @@ pub struct Desk {
     /// Where each app's window was when it last closed: its floating content rect and how it
     /// was tiled. A Wayland program cannot place itself; the next window of it opens there
     /// (wm.rs, kept in ~/.config/resc-desk/places.conf).
+    /// Pointer locks and confinements games asked for (`constraint`).
+    pub constraints: Vec<crate::constraint::Constraint>,
     pub places: std::collections::HashMap<String, (crate::geom::Rect, crate::state::Tile)>,
     /// Primary selection: the last text selected, pasted with the middle button.
     pub primary: Option<DKey>,

@@ -282,13 +282,6 @@ fn open_dev(path: &str) -> Option<Dev> {
     })
 }
 
-fn pointer_by(d: &mut Desk, dx: f64, dy: f64, ms: u64) {
-    // Device pixels are physical pixels of the monitor under the pointer.
-    let scale = d.output_at(d.seat.x, d.seat.y).map_or(1.0, |oi| d.outputs[oi].scale);
-    let (x, y) = (d.seat.x + dx / scale, d.seat.y + dy / scale);
-    let (x, y) = crate::layout::wall_motion(d, (d.seat.x, d.seat.y), (x, y));
-    crate::input::pointer_motion(d, x, y, ms as u32);
-}
 
 fn click(d: &mut Desk, button: u32, ms: u64) {
     crate::input::pointer_button(d, button, true, ms as u32);
@@ -351,7 +344,7 @@ fn event(d: &mut Desk, dev: &mut Dev, ty: u16, code: u16, value: i32, ms: u64, a
                 dev.dy = 0;
                 // Mild acceleration: faster flicks go further.
                 let k = 1.0 + 0.06 * (dx * dx + dy * dy).sqrt().min(40.0);
-                pointer_by(d, dx * k, dy * k, ms);
+                crate::input::pointer_by(d, dx * k, dy * k, (dx, dy), ms);
             }
             for axis in 0..2 {
                 let (lo, hi) = (std::mem::take(&mut dev.wheel[axis]), std::mem::take(&mut dev.wheel_hi[axis]));
@@ -479,7 +472,7 @@ fn touchpad_frame(d: &mut Desk, dev: &mut Dev, ms: u64) {
     // Speed in mm/s: slow moves are precise, fast ones go up to 3× further.
     let v = dist / dt;
     let k = (0.6 + v / 80.0).clamp(0.6, 3.0);
-    pointer_by(d, mx * TP_PX_PER_MM * k, my * TP_PX_PER_MM * k, ms);
+    crate::input::pointer_by(d, mx * TP_PX_PER_MM * k, my * TP_PX_PER_MM * k, (mx * TP_PX_PER_MM, my * TP_PX_PER_MM), ms);
 }
 
 #[cfg(test)]

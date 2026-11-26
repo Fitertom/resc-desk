@@ -154,6 +154,12 @@ fn run(d: &mut Desk, b: &mut dyn Backend, cmd: &str, out: &mut String) -> Result
             let y: f64 = arg(1)?.parse().map_err(|_| "bad y")?;
             input::pointer_motion(d, x, y, t);
         }
+        // As the mouse moves it: relative, through a game's lock or confinement.
+        "nudge" => {
+            let dx: f64 = arg(0)?.parse().map_err(|_| "bad dx")?;
+            let dy: f64 = arg(1)?.parse().map_err(|_| "bad dy")?;
+            input::pointer_by(d, dx, dy, (dx, dy), t as u64);
+        }
         "button" => {
             let bt = btn(arg(0)?)?;
             // As from the mouse: a bound button does its binding (mousebind.rs).

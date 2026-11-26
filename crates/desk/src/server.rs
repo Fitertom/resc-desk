@@ -710,6 +710,54 @@ fn dispatch(d: &mut Desk, ck: CKey, h: wl::wire::MsgHdr, iface: Iface, ver: u32)
                 destroy_obj(d, ck, id);
             }
         }
+        Iface::ZwpPointerConstraintsV1 => match parse!(d, ck, h, zwp_pointer_constraints_v1) {
+            zwp_pointer_constraints_v1::Request::Destroy => destroy_obj(d, ck, id),
+            zwp_pointer_constraints_v1::Request::LockPointer { id: nid, surface, pointer: _, region: _, lifetime } => {
+                if let Some(sk) = surface_of(d, ck, surface) {
+                    if new_obj(d, ck, nid, Iface::ZwpLockedPointerV1, 1, Data::None) {
+                        crate::constraint::create(d, ck, id, nid, sk, true, lifetime);
+                    }
+                }
+            }
+            zwp_pointer_constraints_v1::Request::ConfinePointer { id: nid, surface, pointer: _, region: _, lifetime } => {
+                if let Some(sk) = surface_of(d, ck, surface) {
+                    if new_obj(d, ck, nid, Iface::ZwpConfinedPointerV1, 1, Data::None) {
+                        crate::constraint::create(d, ck, id, nid, sk, false, lifetime);
+                    }
+                }
+            }
+        },
+        Iface::ZwpLockedPointerV1 => match parse!(d, ck, h, zwp_locked_pointer_v1) {
+            zwp_locked_pointer_v1::Request::Destroy => {
+                crate::constraint::destroy(d, ck, id);
+                destroy_obj(d, ck, id);
+            }
+            zwp_locked_pointer_v1::Request::SetCursorPositionHint { surface_x, surface_y } => {
+                crate::constraint::set_hint(d, ck, id, surface_x.to_f64(), surface_y.to_f64());
+            }
+            zwp_locked_pointer_v1::Request::SetRegion { region: _ } => {}
+        },
+        Iface::ZwpConfinedPointerV1 => match parse!(d, ck, h, zwp_confined_pointer_v1) {
+            zwp_confined_pointer_v1::Request::Destroy => {
+                crate::constraint::destroy(d, ck, id);
+                destroy_obj(d, ck, id);
+            }
+            zwp_confined_pointer_v1::Request::SetRegion { region: _ } => {}
+        },
+        Iface::ZwpRelativePointerManagerV1 => match parse!(d, ck, h, zwp_relative_pointer_manager_v1) {
+            zwp_relative_pointer_manager_v1::Request::Destroy => destroy_obj(d, ck, id),
+            zwp_relative_pointer_manager_v1::Request::GetRelativePointer { id: nid, pointer: _ } => {
+                if new_obj(d, ck, nid, Iface::ZwpRelativePointerV1, 1, Data::None) {
+                    d.clients[ck].rel_pointers.push(nid);
+                }
+            }
+        },
+        Iface::ZwpRelativePointerV1 => {
+            if let zwp_relative_pointer_v1::Request::Destroy = parse!(d, ck, h, zwp_relative_pointer_v1) {
+                d.clients[ck].rel_pointers.retain(|p| *p != id);
+                destroy_obj(d, ck, id);
+            }
+        }
         Iface::WpCursorShapeManagerV1 => match parse!(d, ck, h, wp_cursor_shape_manager_v1) {
             wp_cursor_shape_manager_v1::Request::Destroy => destroy_obj(d, ck, id),
             wp_cursor_shape_manager_v1::Request::GetPointer { cursor_shape_device, pointer: _ } => {
@@ -897,6 +945,8 @@ pub fn advertised_globals(d: &mut Desk) {
         (WpFractionalScaleManagerV1, 1),
         (ZxdgOutputManagerV1, 3),
         (WpCursorShapeManagerV1, 1),
+        (ZwpPointerConstraintsV1, 1),
+        (ZwpRelativePointerManagerV1, 1),
         (WpSinglePixelBufferManagerV1, 1),
         (ZwlrScreencopyManagerV1, 3),
     ] {

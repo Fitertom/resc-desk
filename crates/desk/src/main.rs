@@ -1,5 +1,6 @@
 //! resc-desk: a Wayland compositor + desktop shell written from scratch in Rust.
 mod anim;
+mod constraint;
 mod prof;
 mod media;
 mod mousebind;
@@ -219,6 +220,7 @@ fn main() {
         dnd: None,
         place_next: None,
         places: crate::wm::load_places(),
+        constraints: Vec::new(),
         primary: None,
         children: vec![],
         running: true,
@@ -430,6 +432,8 @@ fn main() {
                 eprintln!("screenshot saved to {path}");
             }
         }
+        // A shell panel opened or a window took the keyboard: a game's lock lets go, or takes again.
+        constraint::update(&mut d);
         d.flush_clients();
         // Monitor settings changed (Win+P, the settings app): the backend applies them.
         if d.mons.reconfigure {

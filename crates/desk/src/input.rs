@@ -243,6 +243,34 @@ pub fn pointer_motion(d: &mut Desk, x: f64, y: f64, time: u32) {
     shell::pointer_hover(d);
     // (Autohide, and a game over a monitor gone: the taskbar may have to move.)
     shell::taskbar_poke(d);
+    crate::constraint::update(d);
+}
+
+/// The mouse moved by (dx, dy) device pixels (accelerated; `raw` as the device moved). The
+/// client under it gets the motion as relative motion too; a game's lock keeps the pointer
+/// where it is, its confinement inside its surface.
+pub fn pointer_by(d: &mut Desk, dx: f64, dy: f64, raw: (f64, f64), ms: u64) {
+    // Device pixels are physical pixels of the monitor under the pointer.
+    let scale = d.output_at(d.seat.x, d.seat.y).map_or(1.0, |oi| d.outputs[oi].scale);
+    crate::constraint::update(d);
+    crate::constraint::relative(d, dx / scale, dy / scale, raw, ms);
+    if crate::constraint::locked(d) {
+        if let Some(ck) = d.seat.ptr_focus.and_then(|sk| d.surfaces.get(sk)).map(|s| s.client) {
+            if let Some(c) = d.clients.get_mut(ck) {
+                for p in c.pointers.clone() {
+                    ptr_frame(c, p);
+                }
+            }
+        }
+        return;
+    }
+    let (x, y) = (d.seat.x + dx / scale, d.seat.y + dy / scale);
+    let (mut x, mut y) = crate::layout::wall_motion(d, (d.seat.x, d.seat.y), (x, y));
+    if let Some(r) = crate::constraint::confine_rect(d) {
+        x = x.clamp(r.x as f64, (r.x1() - 1) as f64);
+        y = y.clamp(r.y as f64, (r.y1() - 1) as f64);
+    }
+    pointer_motion(d, x, y, ms as u32);
 }
 
 fn clamp_to_layout(d: &Desk, x: f64, y: f64) -> (f64, f64) {
@@ -1216,6 +1244,7 @@ pub fn damage_cursor(d: &mut Desk) {
 /// A surface died: drop every reference the seat holds to it.
 pub fn surface_gone(d: &mut Desk, sk: SKey) {
     crate::dnd::surface_gone(d, sk);
+    crate::constraint::surface_gone(d, sk);
     if d.seat.ptr_focus == Some(sk) {
         d.seat.ptr_focus = None;
     }

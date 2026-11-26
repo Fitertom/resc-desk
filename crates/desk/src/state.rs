@@ -54,6 +54,8 @@ pub struct Client {
     pub next_sid: u32,
     pub dead: Option<String>,
     pub pointers: Vec<ObjId>,
+    /// zwp_relative_pointer_v1 objects: raw mouse motion goes to them.
+    pub rel_pointers: Vec<ObjId>,
     pub keyboards: Vec<ObjId>,
     pub outputs: Vec<(u32, ObjId)>,
     pub xdg_outputs: Vec<(u32, ObjId)>,
@@ -71,6 +73,7 @@ impl Client {
             next_sid: SERVER_ID_BASE,
             dead: None,
             pointers: vec![],
+            rel_pointers: vec![],
             keyboards: vec![],
             outputs: vec![],
             xdg_outputs: vec![],
