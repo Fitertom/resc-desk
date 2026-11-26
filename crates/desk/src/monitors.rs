@@ -215,12 +215,28 @@ pub unsafe fn copy_out(src: &[u32], ow: i32, oh: i32, r: Rect, rot: u16, dst: *m
         }
         return;
     }
-    for y in r.y..r.y1() {
-        for x in r.x..r.x1() {
+    // Along the panel's rows: the buffer is write-combined (a dumb buffer), where writes
+    // that jump a row each (a turned panel walked in the desk's order) are tens of times
+    // slower than a row written in order. Each panel row is made here and copied whole.
+    let pr = rect_to_panel(r, ow, oh, rot);
+    let mut row = vec![0u32; pr.w.max(0) as usize];
+    for v in pr.y..pr.y1() {
+        for (i, u) in (pr.x..pr.x1()).enumerate() {
+            let (x, y) = from_panel(u, v, ow, oh, rot);
             let p = src[(y * ow + x) as usize];
-            let (u, v) = to_panel(x, y, ow, oh, rot);
-            *(dst.add(v as usize * pitch + u as usize * 4) as *mut u32) = if hdr { pq10(p) } else { p };
+            row[i] = if hdr { pq10(p) } else { p };
         }
+        std::ptr::copy_nonoverlapping(row.as_ptr(), dst.add(v as usize * pitch + pr.x as usize * 4) as *mut u32, row.len());
+    }
+}
+
+/// The desk's pixel shown at panel pixel (u, v) (`to_panel` backwards).
+pub fn from_panel(u: i32, v: i32, ow: i32, oh: i32, rot: u16) -> (i32, i32) {
+    match rot {
+        90 => (v, oh - 1 - u),
+        180 => (ow - 1 - u, oh - 1 - v),
+        270 => (ow - 1 - v, u),
+        _ => (u, v),
     }
 }
 
@@ -601,6 +617,30 @@ mod tests {
             let q = pq10(0xff00_0000 | v << 8) >> 10 & 1023;
             assert!(q >= last);
             last = q;
+        }
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    #[test]
+    fn copy_out_turned_matches_pixel_mapping() {
+        let (ow, oh) = (7, 5);
+        let src: Vec<u32> = (0..ow * oh).map(|i| i as u32 + 1).collect();
+        for rot in [0u16, 90, 180, 270] {
+            let (pw, ph) = if rot == 90 || rot == 270 { (oh, ow) } else { (ow, oh) };
+            let mut dst = vec![0u32; (pw * ph) as usize];
+            let r = Rect::new(1, 2, 4, 3);
+            unsafe { copy_out(&src, ow, oh, r, rot, dst.as_mut_ptr() as *mut u8, pw as usize * 4, false) };
+            let mut want = vec![0u32; (pw * ph) as usize];
+            for y in r.y..r.y1() {
+                for x in r.x..r.x1() {
+                    let (u, v) = to_panel(x, y, ow, oh, rot);
+                    want[(v * pw + u) as usize] = src[(y * ow + x) as usize];
+                }
+            }
+            assert_eq!(dst, want, "rot {rot}");
         }
     }
 }
